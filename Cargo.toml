@@ -1,0 +1,8 @@
+[package]
+name = "sdr"
+version = "0.1.0"
+authors = ["ostrosco <ostrosco@fastmail.fm>"]
+
+[dependencies]
+num = "*"
+rtlsdr = "0.1.4"
