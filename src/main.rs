@@ -12,7 +12,7 @@ const BUF_SIZE: usize = 131072;
 // Most other sample rates fail, but this one works for my particular device.
 // I will investigate exactly what's happening here and generate a list of
 // possible sample rates (if there are others besides this one).
-const SAMPLE_RATE: i32 = 2048000;
+const SAMPLE_RATE: u32 = 2048000;
 
 fn main() {
     let sdr_index: i32 = env::args()
