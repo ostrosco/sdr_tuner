@@ -17,16 +17,16 @@ const BUF_SIZE: usize = 131072;
 // Most other sample rates fail, but this one works for my particular device.
 // I will investigate exactly what's happening here and generate a list of
 // possible sample rates (if there are others besides this one).
-const SAMPLE_RATE: u32 = 1800000;
+const SAMPLE_RATE: u32 = 1140000;
 
 // Here is the sample rate of the output waveform we'll try to use.
-const SAMPLE_RATE_FREQ: f64 = 48000.0;
+const SAMPLE_RATE_AUDIO: f64 = 44100.0;
+
+const DEVIATION: u32 = 2500;
+
+const BANDWIDTH: u32 = 200000;
 
 const CHANNELS: i32 = 2;
-
-const DEVIATION: i32 = 2500;
-
-const BANDWIDTH: u32 = 25000;
 
 fn main() {
     match run() {
@@ -44,22 +44,42 @@ fn run() -> Result<(), Box<Error>> {
         .parse::<f32>()?;
 
     // Initialize the PortAudio class.
-    let pa = pa::PortAudio::new()?;
-    let settings = pa.default_output_stream_settings(CHANNELS,
-                                                     SAMPLE_RATE_FREQ,
-                                                     BUF_SIZE as u32)
-        .unwrap();
-    let mut stream = pa.open_blocking_stream(settings)?;
+    let audio = try!(pa::PortAudio::new());
+    let settings =
+        try!(audio.default_output_stream_settings(CHANNELS,
+                                                  SAMPLE_RATE_AUDIO,
+                                                  BUF_SIZE as u32));
+    let mut stream = try!(audio.open_blocking_stream(settings));
     try!(stream.start());
 
     let fm_freq: u32 = (fm_freq_mhz * 1e6) as u32;
     let mut sdr = init_sdr(sdr_index, fm_freq).unwrap();
-    let gain = (2.0 * PI * DEVIATION as f32 / SAMPLE_RATE_FREQ as f32).recip();
+
+    // TODO: does this gain value make sense based on what I'm doing?
+    let gain = (2.0 * PI * DEVIATION as f32 / SAMPLE_RATE_AUDIO as f32).recip();
 
     loop {
-        // Read the samples, convert to copmlex values, and demodulate them.
+        // Read the samples and decimate down to match the sample rate of the
+        // audio that'll be going out. 
+        //
+        // TODO: on 88.7 I can make out some instruments, but the audio is still
+        // very, very poor. Need to figure out what we need to do here. At a
+        // minimum, we need a low-pass filter to filter out the high
+        // frequency components that are almost certainly aliasing. In addition,
+        // we are underflowing the audio buffer. Not sure if this is a 
+        // performance issue (release didn't help) or if I need to re-think how
+        // I send data to the sound card.
         let bytes = sdr.read_sync(BUF_SIZE).unwrap();
-        let iq_vec = read_samples(bytes).unwrap();
+        let mut iq_vec = read_samples(bytes).unwrap();
+        let dec_rate = (SAMPLE_RATE as f64/ SAMPLE_RATE_AUDIO) as usize;
+        iq_vec = decimate(iq_vec, dec_rate);
+
+        // After decimation, demodulate the signal. 
+        //
+        // TODO: from what I've read there should be some decimation here as
+        // well but with narrowband FM, we decimate the signal into 
+        // nothingness. Need to figure out what we do between wideband and
+        // narrowband FM.
         let mut demod_iq = demod_fm(iq_vec, gain);
 
         // Get the write stream and write our samples to the stream.
@@ -73,7 +93,8 @@ fn run() -> Result<(), Box<Error>> {
             Err(e) => return Err(Box::new(e)),
         };
 
-        let buffer_frames = (demod_iq.len() / CHANNELS as usize) as u32;
+        let buffer_frames = (demod_iq.len() / CHANNELS as usize) as
+                            u32;
         let write_frames = if buffer_frames >= out_frames {
             out_frames
         } else {
@@ -96,6 +117,26 @@ fn init_sdr(sdr_index: i32, fm_freq: u32) -> Result<RTLSDRDevice, RTLSDRError> {
     try!(sdr.set_agc_mode(true));
     try!(sdr.reset_buffer());
     Ok(sdr)
+}
+
+fn decimate_queue<T: Copy>(signal: VecDeque<T>, dec_rate: usize) -> VecDeque<T> {
+    let mut ix = 0;
+    let mut signal_dec = VecDeque::<T>::new();
+    while ix < signal.len() {
+        signal_dec.push_back(*(signal.get(ix).unwrap()));
+        ix += dec_rate;
+    }
+    signal_dec
+}
+
+fn decimate<T: Copy>(signal: Vec<T>, dec_rate: usize) -> Vec<T> {
+    let mut ix = 0;
+    let mut signal_dec = Vec::<T>::new();
+    while ix < signal.len() {
+        signal_dec.push(*(signal.get(ix).unwrap()));
+        ix += dec_rate;
+    }
+    signal_dec
 }
 
 fn read_samples(bytes: Vec<u8>) -> Option<Vec<Complex<f32>>> {
@@ -127,7 +168,7 @@ fn demod_fm(iq: Vec<Complex<f32>>, gain: f32) -> VecDeque<f32> {
     let mut prev = iq[0];
     for ix in 0..iq.len() {
         let c: Complex<f32> = prev.conj() * iq[ix];
-        demod_queue.push_back(c.im.atan2(c.re) * gain);
+        demod_queue.push_back(c.re.atan2(c.im) * gain);
         prev = iq[ix];
     }
     demod_queue
