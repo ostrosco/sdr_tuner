@@ -16,12 +16,12 @@ use std::sync::mpsc::channel;
 
 // Make sure that the buffer size is radix-2, otherwise the read_sync function
 // will fail with an error code of -8.
-const BUF_SIZE: usize = 131072;
+const BUF_SIZE: usize = 1048576;
 
 // Most other sample rates fail, but this one works for my particular device.
 // I will investigate exactly what's happening here and generate a list of
 // possible sample rates (if there are others besides this one).
-const SAMPLE_RATE: u32 = 1140000;
+const SAMPLE_RATE: u32 = 2800000;
 
 // Here is the sample rate of the output waveform we'll try to use.
 const SAMPLE_RATE_AUDIO: f64 = 48000.0;
@@ -49,10 +49,12 @@ unsafe impl Send for RTLSDR {}
 
 
 fn run() -> Result<(), Box<Error>> {
-    let sdr_index: i32 = env::args().nth(1)
+    let sdr_index: i32 = env::args()
+        .nth(1)
         .expect("Please specify the SDR index")
         .parse::<i32>()?;
-    let fm_freq_mhz: f32 = env::args().nth(2)
+    let fm_freq_mhz: f32 = env::args()
+        .nth(2)
         .expect("Please specify a center frequency (MHz).")
         .parse::<f32>()?;
 
@@ -65,7 +67,7 @@ fn run() -> Result<(), Box<Error>> {
     let mut stream = try!(audio.open_blocking_stream(settings));
     try!(stream.start());
 
-    let fm_freq: u32 = (fm_freq_mhz * 1e6) as u32 - F_OFFSET;
+    let fm_freq: u32 = (fm_freq_mhz * 1e6) as u32;
     let mut sdr = RTLSDR { rtlsdr: init_sdr(sdr_index, fm_freq).unwrap() };
 
     let dec_rate = (SAMPLE_RATE as f64 / BANDWIDTH as f64) as usize;
@@ -77,10 +79,12 @@ fn run() -> Result<(), Box<Error>> {
             // the audio that'll be going out.
             let tx = tx.clone();
             let bytes = sdr.rtlsdr.read_sync(BUF_SIZE).unwrap();
-            let iq_vec = decimate(read_samples(bytes, SAMPLE_RATE, F_OFFSET)
-                                      .unwrap()
-                                      .as_slice(),
-                                  dec_rate);
+            let iq_vec = average_filter(decimate(read_samples(bytes,
+                                                              SAMPLE_RATE,
+                                                              fm_freq)
+                                                         .unwrap()
+                                                         .as_slice(),
+                                                 dec_rate));
 
             // After decimation, demodulate the signal.
             //
@@ -107,14 +111,11 @@ fn run() -> Result<(), Box<Error>> {
         };
 
         let buffer_frames = (demod_iq.len() / CHANNELS as usize) as u32;
-        let write_frames = if buffer_frames >= out_frames {
-            out_frames
-        } else {
-            buffer_frames
-        };
+        let write_frames = std::cmp::min(buffer_frames, out_frames);
         let n_write_samples = write_frames as usize * CHANNELS as usize;
 
-        stream.write(write_frames,
+        stream
+            .write(write_frames,
                    |output| for ix in 0..n_write_samples as usize {
                        output[ix] = demod_iq.pop_front().unwrap();
                    })?;
@@ -159,9 +160,8 @@ fn read_samples(bytes: Vec<u8>,
                 offset: u32)
                 -> Option<Vec<Complex<f32>>> {
     let j: Complex<f32> = Complex::i();
-    let mut fc_ds: Complex<f32> = (-1.0 * j * 2.0 * PI * offset as f32 /
-                                   sample_freq as f32) as
-                                  Complex<f32>;
+    let mut fc_ds: Complex<f32> =
+        (-j * 2.0 * PI * offset as f32 / sample_freq as f32) as Complex<f32>;
     fc_ds = fc_ds.exp();
 
     // First, check that we've been given an even number of bytes. Not sure
@@ -189,9 +189,19 @@ fn demod_fm(iq: Vec<Complex<f32>>) -> VecDeque<f32> {
     let mut demod_queue: VecDeque<f32> = VecDeque::with_capacity(iq.len());
     let mut prev = iq[0];
     for ix in 0..iq.len() {
-        let c: Complex<f32> = prev.conj() * iq[ix];
-        demod_queue.push_back(c.re.atan2(c.im));
+        demod_queue.push_back((prev.conj() * iq[ix]).arg());
         prev = iq[ix];
     }
     demod_queue
+}
+
+fn average_filter(samples: Vec<Complex<f32>>) -> Vec<Complex<f32>> {
+    let beta: f32 = 0.5;
+    let mut sampl = samples.clone();
+    let mut prev: Complex<f32> = Complex::new(0.0, 0.0);
+    for samp in sampl.iter_mut() {
+        *samp = beta * (*samp) + (1.0 - beta) * prev;
+        prev = *samp;
+    }
+    sampl.to_vec()
 }
