@@ -78,8 +78,11 @@ fn run() -> Result<(), Box<Error>> {
     // talk that we decimate based on the bandwidth but after decimation the
     // audio signal comes out much slower. Changing the decimation value
     // seems to affect the speed of the audio, so I need to establish the
-    // relationship here.
+    // relationship here. Just playing with the decimation value, 30 seems
+    // to work well but I need to figure out _why_.
     let dec_rate = (SAMPLE_RATE as f64 / BANDWIDTH as f64) as usize;
+    let dec_rate = 30;
+    println!("dec rate is {}", dec_rate);
     let (tx, rx) = channel();
 
     thread::spawn(move || {
@@ -97,7 +100,7 @@ fn run() -> Result<(), Box<Error>> {
 
             // After decimation, demodulate the signal and send out of the
             // thread to the receiver.
-           let demod_iq = demod_fm(iq_vec);
+            let demod_iq = demod_fm(iq_vec);
             tx.send(demod_iq).unwrap();
         }
     });
