@@ -28,10 +28,14 @@ const SAMPLE_RATE_AUDIO: f64 = 48000.0;
 
 const DEVIATION: u32 = 2500;
 
+// I've read someplace that you may want to add an offset due to some bad noise
+// on the center frequency from DC. I'll see if this helps later.
 const F_OFFSET: u32 = 250000;
 
+// The bandwidth of the received signal.
 const BANDWIDTH: u32 = 200000;
 
+// The number of channels being used for audio.
 const CHANNELS: i32 = 2;
 
 fn main() {
@@ -70,6 +74,11 @@ fn run() -> Result<(), Box<Error>> {
     let fm_freq: u32 = (fm_freq_mhz * 1e6) as u32;
     let mut sdr = RTLSDR { rtlsdr: init_sdr(sdr_index, fm_freq).unwrap() };
 
+    // TODO: we need to figure out the appropriate decimation here. I've seen
+    // talk that we decimate based on the bandwidth but after decimation the
+    // audio signal comes out much slower. Changing the decimation value
+    // seems to affect the speed of the audio, so I need to establish the
+    // relationship here.
     let dec_rate = (SAMPLE_RATE as f64 / BANDWIDTH as f64) as usize;
     let (tx, rx) = channel();
 
@@ -86,13 +95,9 @@ fn run() -> Result<(), Box<Error>> {
                                                          .as_slice(),
                                                  dec_rate));
 
-            // After decimation, demodulate the signal.
-            //
-            // TODO: from what I've read there should be some decimation here as
-            // well but with narrowband FM, we decimate the signal into
-            // nothingness. Need to figure out what we do between wideband and
-            // narrowband FM.
-            let demod_iq = demod_fm(iq_vec);
+            // After decimation, demodulate the signal and send out of the
+            // thread to the receiver.
+           let demod_iq = demod_fm(iq_vec);
             tx.send(demod_iq).unwrap();
         }
     });
