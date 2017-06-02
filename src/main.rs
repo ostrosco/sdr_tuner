@@ -14,9 +14,13 @@ use std::error::Error;
 use std::thread;
 use std::sync::mpsc::channel;
 
+
 // Make sure that the buffer size is radix-2, otherwise the read_sync function
 // will fail with an error code of -8.
-const BUF_SIZE: usize = 1048576;
+const SDR_BUF_SIZE: usize = 524288;
+
+// Separating out the buffer sizes seems to help some.
+const BUF_SIZE: usize = 262144;
 
 // Most other sample rates fail, but this one works for my particular device.
 // I will investigate exactly what's happening here and generate a list of
@@ -90,7 +94,7 @@ fn run() -> Result<(), Box<Error>> {
             // Read the samples and decimate down to match the sample rate of
             // the audio that'll be going out.
             let tx = tx.clone();
-            let bytes = sdr.rtlsdr.read_sync(BUF_SIZE).unwrap();
+            let bytes = sdr.rtlsdr.read_sync(SDR_BUF_SIZE).unwrap();
             let iq_vec = average_filter(decimate(read_samples(bytes,
                                                               SAMPLE_RATE,
                                                               fm_freq)
@@ -120,6 +124,9 @@ fn run() -> Result<(), Box<Error>> {
 
         let buffer_frames = (demod_iq.len() / CHANNELS as usize) as u32;
         let write_frames = std::cmp::min(buffer_frames, out_frames);
+        if write_frames == 0 {
+            println!("write frames is 0, are we not generating fast enough?");
+        }
         let n_write_samples = write_frames as usize * CHANNELS as usize;
 
         stream
@@ -195,9 +202,10 @@ fn read_samples(bytes: Vec<u8>,
 
 fn demod_fm(iq: Vec<Complex<f32>>) -> VecDeque<f32> {
     let mut demod_queue: VecDeque<f32> = VecDeque::with_capacity(iq.len());
+    let gain = 0.01;
     let mut prev = iq[0];
     for ix in 0..iq.len() {
-        demod_queue.push_back((prev.conj() * iq[ix]).arg());
+        demod_queue.push_back((prev.conj() * iq[ix]).arg() * gain);
         prev = iq[ix];
     }
     demod_queue
