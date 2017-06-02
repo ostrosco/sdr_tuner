@@ -76,7 +76,6 @@ fn run() -> Result<(), Box<Error>> {
     try!(stream.start());
 
     let fm_freq: u32 = (fm_freq_mhz * 1e6) as u32;
-    let mut sdr = RTLSDR { rtlsdr: init_sdr(sdr_index, fm_freq).unwrap() };
 
     // TODO: we need to figure out the appropriate decimation here. I've seen
     // talk that we decimate based on the bandwidth but after decimation the
@@ -87,31 +86,25 @@ fn run() -> Result<(), Box<Error>> {
     let dec_rate = (SAMPLE_RATE as f64 / BANDWIDTH as f64) as usize;
     let dec_rate = 30;
     println!("dec rate is {}", dec_rate);
-    let (tx, rx) = channel();
+    let mut sdr = RTLSDR { rtlsdr: init_sdr(sdr_index, fm_freq).unwrap() };
 
-    thread::spawn(move || {
-        loop {
-            // Read the samples and decimate down to match the sample rate of
-            // the audio that'll be going out.
-            let tx = tx.clone();
-            let bytes = sdr.rtlsdr.read_sync(SDR_BUF_SIZE).unwrap();
-            let iq_vec = average_filter(decimate(read_samples(bytes,
-                                                              SAMPLE_RATE,
-                                                              fm_freq)
-                                                         .unwrap()
-                                                         .as_slice(),
-                                                 dec_rate));
-
-            // After decimation, demodulate the signal and send out of the
-            // thread to the receiver.
-            let demod_iq = demod_fm(iq_vec);
-            tx.send(demod_iq).unwrap();
-        }
-    });
 
     loop {
+        // Read the samples and decimate down to match the sample rate of
+        // the audio that'll be going out.
+        let bytes = sdr.rtlsdr.read_sync(SDR_BUF_SIZE).unwrap();
+        let iq_vec = average_filter(decimate(read_samples(bytes,
+                                                          SAMPLE_RATE,
+                                                          fm_freq)
+                                                     .unwrap()
+                                                     .as_slice(),
+                                             dec_rate));
+
+        // After decimation, demodulate the signal and send out of the
+        // thread to the receiver.
+        let mut demod_iq = demod_fm(iq_vec);
+
         // Get the write stream and write our samples to the stream.
-        let mut demod_iq = rx.recv().unwrap();
         let out_frames = match stream.write_available() {
             Ok(available) => {
                 match available {
