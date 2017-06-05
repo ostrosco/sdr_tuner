@@ -75,6 +75,7 @@ fn run() -> Result<(), Box<Error>> {
     let dec_rate = 25;
     println!("dec rate is {}", dec_rate);
     let mut sdr = RTLSDR { rtlsdr: init_sdr(sdr_index, fm_freq).unwrap() };
+    let mut prev = Complex::new(0.0, 0.0);
 
 
     loop {
@@ -87,7 +88,9 @@ fn run() -> Result<(), Box<Error>> {
 
         // After decimation, demodulate the signal and send out of the
         // thread to the receiver.
-        let mut demod_iq = demod_fm(iq_vec);
+        let mut res = demod_fm(iq_vec, prev);
+        let mut demod_iq = res.0;
+        prev = res.1;
 
         // Get the write stream and write our samples to the stream.
         let out_frames = match stream.write_available() {
@@ -109,7 +112,7 @@ fn run() -> Result<(), Box<Error>> {
 
         stream.write(write_frames,
                    |output| for ix in 0..n_write_samples as usize {
-                       output[ix] = demod_iq.pop_front().unwrap();
+                       output[ix] = 0.005 * demod_iq.pop_front().unwrap();
                    })?;
     }
 }
@@ -119,7 +122,7 @@ fn init_sdr(sdr_index: i32, fm_freq: u32) -> Result<RTLSDRDevice, RTLSDRError> {
     try!(sdr.set_center_freq(fm_freq));
     try!(sdr.set_sample_rate(SAMPLE_RATE));
     try!(sdr.set_tuner_bandwidth(BANDWIDTH));
-    try!(sdr.set_agc_mode(true));
+    try!(sdr.set_agc_mode(false));
     try!(sdr.reset_buffer());
     Ok(sdr)
 }
@@ -156,16 +159,16 @@ fn read_samples(bytes: Vec<u8>) -> Option<Vec<Complex<f32>>> {
     Some(iq_vec)
 }
 
-fn demod_fm(iq: Vec<Complex<f32>>) -> VecDeque<f32> {
+fn demod_fm(iq: Vec<Complex<f32>>, prev: Complex<f32>) -> (VecDeque<f32>, Complex<f32>) {
+    let mut p = prev.clone();
     let mut demod_queue: VecDeque<f32> = VecDeque::with_capacity(iq.len());
     let gain = SAMPLE_RATE as f32 / (2.0 * PI * 75e3 / 8.0);
-    let mut prev = Complex::new(0.0, 0.0);
 
     for samp in iq.iter() {
-        let conj = prev.conj() * samp;
+        let conj = p.conj() * samp;
         let fm_val = conj.im.atan2(conj.re);
         demod_queue.push_back(fm_val * gain);
-        prev = *samp;
+        p = *samp;
     }
-    demod_queue
+    (demod_queue, p)
 }
