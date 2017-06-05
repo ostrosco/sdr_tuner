@@ -10,10 +10,6 @@ use std::collections::VecDeque;
 use std::f32::consts::PI;
 use std::error::Error;
 
-// Threading libraries.
-use std::thread;
-use std::sync::mpsc::channel;
-
 
 // Make sure that the buffer size is radix-2, otherwise the read_sync function
 // will fail with an error code of -8.
@@ -30,14 +26,8 @@ const SAMPLE_RATE: u32 = 2800000;
 // Here is the sample rate of the output waveform we'll try to use.
 const SAMPLE_RATE_AUDIO: f64 = 48000.0;
 
-const DEVIATION: u32 = 2500;
-
-// I've read someplace that you may want to add an offset due to some bad noise
-// on the center frequency from DC. I'll see if this helps later.
-const F_OFFSET: u32 = 250000;
-
 // The bandwidth of the received signal.
-const BANDWIDTH: u32 = 200000;
+const BANDWIDTH: u32 = 5000;
 
 // The number of channels being used for audio.
 const CHANNELS: i32 = 2;
@@ -57,12 +47,10 @@ unsafe impl Send for RTLSDR {}
 
 
 fn run() -> Result<(), Box<Error>> {
-    let sdr_index: i32 = env::args()
-        .nth(1)
+    let sdr_index: i32 = env::args().nth(1)
         .expect("Please specify the SDR index")
         .parse::<i32>()?;
-    let fm_freq_mhz: f32 = env::args()
-        .nth(2)
+    let fm_freq_mhz: f32 = env::args().nth(2)
         .expect("Please specify a center frequency (MHz).")
         .parse::<f32>()?;
 
@@ -83,8 +71,8 @@ fn run() -> Result<(), Box<Error>> {
     // seems to affect the speed of the audio, so I need to establish the
     // relationship here. Just playing with the decimation value, 30 seems
     // to work well but I need to figure out _why_.
-    let dec_rate = (SAMPLE_RATE as f64 / BANDWIDTH as f64) as usize;
-    let dec_rate = 30;
+    // let dec_rate = (SAMPLE_RATE as f64 / BANDWIDTH as f64) as usize;
+    let dec_rate = 25;
     println!("dec rate is {}", dec_rate);
     let mut sdr = RTLSDR { rtlsdr: init_sdr(sdr_index, fm_freq).unwrap() };
 
@@ -93,12 +81,9 @@ fn run() -> Result<(), Box<Error>> {
         // Read the samples and decimate down to match the sample rate of
         // the audio that'll be going out.
         let bytes = sdr.rtlsdr.read_sync(SDR_BUF_SIZE).unwrap();
-        let iq_vec = average_filter(decimate(read_samples(bytes,
-                                                          SAMPLE_RATE,
-                                                          fm_freq)
-                                                     .unwrap()
-                                                     .as_slice(),
-                                             dec_rate));
+        let iq_vec =
+            decimate(read_samples(bytes).unwrap().as_slice(),
+                     dec_rate);
 
         // After decimation, demodulate the signal and send out of the
         // thread to the receiver.
@@ -122,8 +107,7 @@ fn run() -> Result<(), Box<Error>> {
         }
         let n_write_samples = write_frames as usize * CHANNELS as usize;
 
-        stream
-            .write(write_frames,
+        stream.write(write_frames,
                    |output| for ix in 0..n_write_samples as usize {
                        output[ix] = demod_iq.pop_front().unwrap();
                    })?;
@@ -140,18 +124,6 @@ fn init_sdr(sdr_index: i32, fm_freq: u32) -> Result<RTLSDRDevice, RTLSDRError> {
     Ok(sdr)
 }
 
-fn decimate_queue<T: Copy>(signal: VecDeque<T>,
-                           dec_rate: usize)
-                           -> VecDeque<T> {
-    let mut ix = 0;
-    let mut signal_dec = VecDeque::<T>::new();
-    while ix < signal.len() {
-        signal_dec.push_back(*(signal.get(ix).unwrap()));
-        ix += dec_rate;
-    }
-    signal_dec
-}
-
 fn decimate(signal: &[Complex<f32>], dec_rate: usize) -> Vec<Complex<f32>> {
     let mut ix = 0;
     let new_size = (signal.len() / dec_rate + 1) as usize;
@@ -163,15 +135,7 @@ fn decimate(signal: &[Complex<f32>], dec_rate: usize) -> Vec<Complex<f32>> {
     signal_dec
 }
 
-fn read_samples(bytes: Vec<u8>,
-                sample_freq: u32,
-                offset: u32)
-                -> Option<Vec<Complex<f32>>> {
-    let j: Complex<f32> = Complex::i();
-    let mut fc_ds: Complex<f32> =
-        (-j * 2.0 * PI * offset as f32 / sample_freq as f32) as Complex<f32>;
-    fc_ds = fc_ds.exp();
-
+fn read_samples(bytes: Vec<u8>) -> Option<Vec<Complex<f32>>> {
     // First, check that we've been given an even number of bytes. Not sure
     // what to do if we don't get I and Q.
     let bytes_len = bytes.len();
@@ -185,9 +149,8 @@ fn read_samples(bytes: Vec<u8>,
     // Write the values to the complex value and normalize from [0, 255] to
     // [-1, 1]. If we don't normalize, it seems we don't get anything.
     for iq in bytes.chunks(2) {
-        let iq_cmplx = Complex::new((iq[0] as f32 - 127.0) / 127.0,
-                                    (iq[1] as f32 - 127.0) / 127.0) *
-                       fc_ds;
+        let iq_cmplx = Complex::new((iq[0] as f32 - 127.0),
+                                    (iq[1] as f32 - 127.0));
         iq_vec.push(iq_cmplx);
     }
     Some(iq_vec)
@@ -195,22 +158,14 @@ fn read_samples(bytes: Vec<u8>,
 
 fn demod_fm(iq: Vec<Complex<f32>>) -> VecDeque<f32> {
     let mut demod_queue: VecDeque<f32> = VecDeque::with_capacity(iq.len());
-    let gain = 0.01;
-    let mut prev = iq[0];
-    for ix in 0..iq.len() {
-        demod_queue.push_back((prev.conj() * iq[ix]).arg() * gain);
-        prev = iq[ix];
-    }
-    demod_queue
-}
+    let gain = SAMPLE_RATE as f32 / (2.0 * PI * 75e3 / 8.0);
+    let mut prev = Complex::new(0.0, 0.0);
 
-fn average_filter(samples: Vec<Complex<f32>>) -> Vec<Complex<f32>> {
-    let beta: f32 = 0.5;
-    let mut sampl = samples.clone();
-    let mut prev: Complex<f32> = Complex::new(0.0, 0.0);
-    for samp in sampl.iter_mut() {
-        *samp = beta * (*samp) + (1.0 - beta) * prev;
+    for samp in iq.iter() {
+        let conj = prev.conj() * samp;
+        let fm_val = conj.im.atan2(conj.re);
+        demod_queue.push_back(fm_val * gain);
         prev = *samp;
     }
-    sampl.to_vec()
+    demod_queue
 }
