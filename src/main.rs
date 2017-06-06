@@ -26,9 +26,6 @@ const SAMPLE_RATE: u32 = 2800000;
 // Here is the sample rate of the output waveform we'll try to use.
 const SAMPLE_RATE_AUDIO: f64 = 48000.0;
 
-// The bandwidth of the received signal.
-const BANDWIDTH: u32 = 5000;
-
 // The number of channels being used for audio.
 const CHANNELS: i32 = 2;
 
@@ -53,6 +50,9 @@ fn run() -> Result<(), Box<Error>> {
     let fm_freq_mhz: f32 = env::args().nth(2)
         .expect("Please specify a center frequency (MHz).")
         .parse::<f32>()?;
+    let bandwidth: u32 = env::args().nth(3)
+        .expect("Please specify the bandwidth.")
+        .parse::<u32>()?;
 
     // Initialize the PortAudio class.
     let audio = try!(pa::PortAudio::new());
@@ -71,10 +71,11 @@ fn run() -> Result<(), Box<Error>> {
     // seems to affect the speed of the audio, so I need to establish the
     // relationship here. Just playing with the decimation value, 30 seems
     // to work well but I need to figure out _why_.
-    // let dec_rate = (SAMPLE_RATE as f64 / BANDWIDTH as f64) as usize;
-    let dec_rate = 25;
+    // let dec_rate = (SAMPLE_RATE as f64 / bandwidth as f64) as usize;
+    let dec_rate = 30;
     println!("dec rate is {}", dec_rate);
-    let mut sdr = RTLSDR { rtlsdr: init_sdr(sdr_index, fm_freq).unwrap() };
+    let mut sdr =
+        RTLSDR { rtlsdr: init_sdr(sdr_index, fm_freq, bandwidth).unwrap() };
     let mut prev = Complex::new(0.0, 0.0);
 
 
@@ -82,14 +83,14 @@ fn run() -> Result<(), Box<Error>> {
         // Read the samples and decimate down to match the sample rate of
         // the audio that'll be going out.
         let bytes = sdr.rtlsdr.read_sync(SDR_BUF_SIZE).unwrap();
-        let iq_vec =
-            decimate(read_samples(bytes).unwrap().as_slice(),
-                     dec_rate);
+        let mut iq_vec = decimate(read_samples(bytes).unwrap().as_slice(),
+                                  dec_rate);
+        iq_vec = filter(iq_vec, moving_average(10));
 
         // After decimation, demodulate the signal and send out of the
         // thread to the receiver.
-        let mut res = demod_fm(iq_vec, prev);
-        let mut demod_iq = res.0;
+        let res = demod_fm(iq_vec, prev);
+        let mut demod_iq = res.0; // filter_queue(res.0, moving_average(1));
         prev = res.1;
 
         // Get the write stream and write our samples to the stream.
@@ -117,11 +118,14 @@ fn run() -> Result<(), Box<Error>> {
     }
 }
 
-fn init_sdr(sdr_index: i32, fm_freq: u32) -> Result<RTLSDRDevice, RTLSDRError> {
+fn init_sdr(sdr_index: i32,
+            fm_freq: u32,
+            bandwidth: u32)
+            -> Result<RTLSDRDevice, RTLSDRError> {
     let mut sdr = try!(rtlsdr::open(sdr_index));
     try!(sdr.set_center_freq(fm_freq));
     try!(sdr.set_sample_rate(SAMPLE_RATE));
-    try!(sdr.set_tuner_bandwidth(BANDWIDTH));
+    try!(sdr.set_tuner_bandwidth(bandwidth));
     try!(sdr.set_agc_mode(false));
     try!(sdr.reset_buffer());
     Ok(sdr)
@@ -152,14 +156,17 @@ fn read_samples(bytes: Vec<u8>) -> Option<Vec<Complex<f32>>> {
     // Write the values to the complex value and normalize from [0, 255] to
     // [-1, 1]. If we don't normalize, it seems we don't get anything.
     for iq in bytes.chunks(2) {
-        let iq_cmplx = Complex::new((iq[0] as f32 - 127.0),
-                                    (iq[1] as f32 - 127.0));
+        let iq_cmplx = Complex::new((iq[0] as f32 - 127.0) / 127.0,
+                                    (iq[1] as f32 - 127.0) / 127.0);
         iq_vec.push(iq_cmplx);
     }
     Some(iq_vec)
 }
 
-fn demod_fm(iq: Vec<Complex<f32>>, prev: Complex<f32>) -> (VecDeque<f32>, Complex<f32>) {
+fn demod_fm(iq: Vec<Complex<f32>>,
+            prev: Complex<f32>)
+            -> (VecDeque<f32>, Complex<f32>) {
+
     let mut p = prev.clone();
     let mut demod_queue: VecDeque<f32> = VecDeque::with_capacity(iq.len());
     let gain = SAMPLE_RATE as f32 / (2.0 * PI * 75e3 / 8.0);
@@ -171,4 +178,30 @@ fn demod_fm(iq: Vec<Complex<f32>>, prev: Complex<f32>) -> (VecDeque<f32>, Comple
         p = *samp;
     }
     (demod_queue, p)
+}
+
+fn filter(samples: Vec<Complex<f32>>, taps: Vec<f32>) -> Vec<Complex<f32>> {
+    let mut filt_samps: Vec<Complex<f32>> = Vec::new();
+    for window in samples.as_slice().windows(taps.len()) {
+        let iter = window.iter().zip(taps.iter());
+        let filt_samp = iter.map(|(x, y)| x * y)
+            .fold(Complex::new(0.0, 0.0), |acc, x| acc + x);
+        filt_samps.push(filt_samp);
+    }
+    filt_samps
+}
+
+fn filter_queue(samples: VecDeque<f32>, taps: Vec<f32>) -> VecDeque<f32> {
+    let mut filt_samps: VecDeque<f32> = VecDeque::new();
+    for window in samples.as_slices().0.windows(taps.len()) {
+        let iter = window.iter().zip(taps.iter());
+        let filt_samp = iter.map(|(x, y)| x * y).sum();
+        filt_samps.push_back(filt_samp);
+    }
+    filt_samps
+
+}
+
+fn moving_average(ntaps: usize) -> Vec<f32> {
+    vec![1.0 / ntaps as f32; ntaps]
 }
