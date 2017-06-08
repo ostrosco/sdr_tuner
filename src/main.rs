@@ -24,7 +24,7 @@ const BUF_SIZE: usize = 262144;
 const SAMPLE_RATE: u32 = 2800000;
 
 // Here is the sample rate of the output waveform we'll try to use.
-const SAMPLE_RATE_AUDIO: f64 = 48000.0;
+const SAMPLE_RATE_AUDIO: f32 = 44100.0;
 
 // The number of channels being used for audio.
 const CHANNELS: i32 = 2;
@@ -58,7 +58,7 @@ fn run() -> Result<(), Box<Error>> {
     let audio = try!(pa::PortAudio::new());
     let settings =
         try!(audio.default_output_stream_settings(CHANNELS,
-                                                  SAMPLE_RATE_AUDIO,
+                                                  SAMPLE_RATE_AUDIO as f64,
                                                   BUF_SIZE as u32));
     let mut stream = try!(audio.open_blocking_stream(settings));
     try!(stream.start());
@@ -71,26 +71,27 @@ fn run() -> Result<(), Box<Error>> {
     // seems to affect the speed of the audio, so I need to establish the
     // relationship here. Just playing with the decimation value, 30 seems
     // to work well but I need to figure out _why_.
-    // let dec_rate = (SAMPLE_RATE as f64 / bandwidth as f64) as usize;
-    let dec_rate = 30;
+    let dec_rate = (SAMPLE_RATE as f64 / bandwidth as f64 * 2.0) as usize;
     println!("dec rate is {}", dec_rate);
     let mut sdr =
         RTLSDR { rtlsdr: init_sdr(sdr_index, fm_freq, bandwidth).unwrap() };
-    let mut prev = Complex::new(0.0, 0.0);
 
+    // This holds the previous value for the moving average filter so we can
+    // keep track in between iterations of reading from the SDR.
+    let mut prev = Complex::new(0.0, 0.0);
 
     loop {
         // Read the samples and decimate down to match the sample rate of
         // the audio that'll be going out.
         let bytes = sdr.rtlsdr.read_sync(SDR_BUF_SIZE).unwrap();
-        let mut iq_vec = decimate(read_samples(bytes).unwrap().as_slice(),
-                                  dec_rate);
-        iq_vec = filter(iq_vec, moving_average(10));
+        let mut iq_vec = read_samples(bytes).unwrap();
+        iq_vec = decimate(iq_vec.as_slice(), dec_rate);
 
         // After decimation, demodulate the signal and send out of the
         // thread to the receiver.
         let res = demod_fm(iq_vec, prev);
-        let mut demod_iq = res.0; // filter_queue(res.0, moving_average(1));
+        let mut demod_iq =
+            filter_queue(res.0, low_pass(50000.0, SAMPLE_RATE as f32, 64));
         prev = res.1;
 
         // Get the write stream and write our samples to the stream.
@@ -137,6 +138,17 @@ fn decimate(signal: &[Complex<f32>], dec_rate: usize) -> Vec<Complex<f32>> {
     let mut signal_dec = Vec::<Complex<f32>>::with_capacity(new_size);
     while ix < signal.len() {
         signal_dec.push(signal[ix]);
+        ix += dec_rate;
+    }
+    signal_dec
+}
+
+fn decimate_queue(signal: &[f32], dec_rate: usize) -> VecDeque<f32> {
+    let mut ix = 0;
+    let new_size = (signal.len() / dec_rate + 1) as usize;
+    let mut signal_dec = VecDeque::<f32>::with_capacity(new_size);
+    while ix < signal.len() {
+        signal_dec.push_back(signal[ix]);
         ix += dec_rate;
     }
     signal_dec
@@ -202,6 +214,37 @@ fn filter_queue(samples: VecDeque<f32>, taps: Vec<f32>) -> VecDeque<f32> {
 
 }
 
+fn hamming(ntaps: usize) -> Vec<f32> {
+    let m: f32 = ntaps as f32 - 1.0;
+    let mut taps: Vec<f32> = Vec::with_capacity(ntaps);
+    for ix in 0..ntaps {
+        taps.push(0.54 - 0.46 * (2.0 * PI * ix as f32 / m).cos());
+    }
+    taps
+}
+
+fn low_pass(cutoff_freq: f32, sample_rate: f32, ntaps: usize) -> Vec<f32> {
+    let wc: f32 = 2.0 * PI * cutoff_freq / sample_rate;
+    let mut taps: Vec<f32> = Vec::with_capacity(ntaps);
+    let win_taps: Vec<f32> = hamming(ntaps);
+    let ntaps_i: i32 = ntaps as i32;
+    let m: i32 = (ntaps_i - 1) / 2;
+
+    for ix in -m..m + 1 {
+        let ix_f: f32 = ix as f32;
+        if ix == 0 {
+            let hi = wc / PI * win_taps[(ix + m) as usize];
+            taps.push(hi);
+        } else {
+            let hi = (ix_f * wc).sin() / (ix_f * PI) *
+                     win_taps[(ix + m) as usize];
+            taps.push(hi);
+        }
+    }
+    taps
+}
+
+#[inline]
 fn moving_average(ntaps: usize) -> Vec<f32> {
     vec![1.0 / ntaps as f32; ntaps]
 }
