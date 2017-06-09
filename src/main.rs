@@ -1,15 +1,20 @@
 extern crate num;
 extern crate portaudio;
 extern crate rtlsdr;
+extern crate dft;
+extern crate gnuplot; 
 
 use portaudio as pa;
 use rtlsdr::{RTLSDRDevice, RTLSDRError};
+use num::Zero;
 use num::complex::Complex;
 use std::env;
 use std::collections::VecDeque;
 use std::f32::consts::PI;
 use std::error::Error;
 
+use gnuplot::*;
+use dft::{Operation, Plan};
 
 // Make sure that the buffer size is radix-2, otherwise the read_sync function
 // will fail with an error code of -8.
@@ -21,7 +26,7 @@ const BUF_SIZE: usize = 262144;
 // Most other sample rates fail, but this one works for my particular device.
 // I will investigate exactly what's happening here and generate a list of
 // possible sample rates (if there are others besides this one).
-const SAMPLE_RATE: u32 = 2800000;
+const SAMPLE_RATE: u32 = 2097152;
 
 // Here is the sample rate of the output waveform we'll try to use.
 const SAMPLE_RATE_AUDIO: f32 = 44100.0;
@@ -79,6 +84,7 @@ fn run() -> Result<(), Box<Error>> {
     // This holds the previous value for the moving average filter so we can
     // keep track in between iterations of reading from the SDR.
     let mut prev = Complex::new(0.0, 0.0);
+    let taps = low_pass(50000.0, SAMPLE_RATE as f32, 100);
 
     loop {
         // Read the samples and decimate down to match the sample rate of
@@ -90,8 +96,7 @@ fn run() -> Result<(), Box<Error>> {
         // After decimation, demodulate the signal and send out of the
         // thread to the receiver.
         let res = demod_fm(iq_vec, prev);
-        let mut demod_iq =
-            filter_queue(res.0, low_pass(50000.0, SAMPLE_RATE as f32, 64));
+        let mut demod_iq = filter_queue(res.0, taps.clone());
         prev = res.1;
 
         // Get the write stream and write our samples to the stream.
@@ -185,8 +190,7 @@ fn demod_fm(iq: Vec<Complex<f32>>,
 
     for samp in iq.iter() {
         let conj = p.conj() * samp;
-        let fm_val = conj.im.atan2(conj.re);
-        demod_queue.push_back(fm_val * gain);
+        demod_queue.push_back(conj.arg() * gain);
         p = *samp;
     }
     (demod_queue, p)
