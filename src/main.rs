@@ -9,7 +9,6 @@ use rtlsdr::{RTLSDRDevice, RTLSDRError};
 use num::Zero;
 use num::complex::Complex;
 use std::env;
-use std::collections::VecDeque;
 use std::f32::consts::PI;
 use std::error::Error;
 
@@ -18,7 +17,7 @@ use dft::{Operation, Plan};
 
 // Make sure that the buffer size is radix-2, otherwise the read_sync function
 // will fail with an error code of -8.
-const SDR_BUF_SIZE: usize = 524288;
+const SDR_BUF_SIZE: usize = 262144;
 
 // Separating out the buffer sizes seems to help some.
 const BUF_SIZE: usize = 262144;
@@ -26,7 +25,7 @@ const BUF_SIZE: usize = 262144;
 // Most other sample rates fail, but this one works for my particular device.
 // I will investigate exactly what's happening here and generate a list of
 // possible sample rates (if there are others besides this one).
-const SAMPLE_RATE: u32 = 2097152;
+const SAMPLE_RATE: u32 = 2400000;
 
 // Here is the sample rate of the output waveform we'll try to use.
 const SAMPLE_RATE_AUDIO: f32 = 44100.0;
@@ -70,33 +69,40 @@ fn run() -> Result<(), Box<Error>> {
 
     let fm_freq: u32 = (fm_freq_mhz * 1e6) as u32;
 
-    // TODO: we need to figure out the appropriate decimation here. I've seen
-    // talk that we decimate based on the bandwidth but after decimation the
-    // audio signal comes out much slower. Changing the decimation value
-    // seems to affect the speed of the audio, so I need to establish the
-    // relationship here. Just playing with the decimation value, 30 seems
-    // to work well but I need to figure out _why_.
-    let dec_rate = (SAMPLE_RATE as f64 / bandwidth as f64 * 2.0) as usize;
-    println!("dec rate is {}", dec_rate);
+    // We were decimating way too much. We need to decimate in two stages: one
+    // to remove nearby stations and another to match the sound card. For
+    // wideband signals, 8 and 3 seems to work well and also hits that sweet
+    // spot of no buffer underflows! 
+    //
+    // TODO: need to still calculate this on the fly. In addition, we need to
+    // find apporpriate decimation values for narrowband. I'm still confident
+    // that the decimation value depends on the bandwitdh, but I need to
+    // figure out that appropriate formula.
+    //
+    let dec_rate_filt = 8;
+    let dec_rate_audio = 3;
     let mut sdr =
         RTLSDR { rtlsdr: init_sdr(sdr_index, fm_freq, bandwidth).unwrap() };
 
     // This holds the previous value for the moving average filter so we can
     // keep track in between iterations of reading from the SDR.
     let mut prev = Complex::new(0.0, 0.0);
-    let taps = low_pass(50000.0, SAMPLE_RATE as f32, 100);
+    let taps = low_pass(bandwidth as f32, SAMPLE_RATE as f32, 8);
 
     loop {
         // Read the samples and decimate down to match the sample rate of
         // the audio that'll be going out.
         let bytes = sdr.rtlsdr.read_sync(SDR_BUF_SIZE).unwrap();
         let mut iq_vec = read_samples(bytes).unwrap();
-        iq_vec = decimate(iq_vec.as_slice(), dec_rate);
+        // plot_spectrum(&iq_vec, &mut figure1);
+        iq_vec = filter(iq_vec, taps.clone());
+        iq_vec = decimate(iq_vec.as_slice(), dec_rate_filt);
 
         // After decimation, demodulate the signal and send out of the
         // thread to the receiver.
         let res = demod_fm(iq_vec, prev);
-        let mut demod_iq = filter_queue(res.0, taps.clone());
+        let mut demod_iq = filter_real(res.0, taps.clone());
+        demod_iq = decimate(demod_iq.as_slice(), dec_rate_audio);
         prev = res.1;
 
         // Get the write stream and write our samples to the stream.
@@ -104,6 +110,7 @@ fn run() -> Result<(), Box<Error>> {
             Ok(available) => {
                 match available {
                     pa::StreamAvailable::Frames(frames) => frames as u32,
+                    pa::StreamAvailable::OutputUnderflowed => return Err(Box::new(pa::error::Error::OutputUnderflowed)),
                     _ => return Err(Box::new(pa::error::Error::NullCallback)),
                 }
             }
@@ -119,9 +126,26 @@ fn run() -> Result<(), Box<Error>> {
 
         stream.write(write_frames,
                    |output| for ix in 0..n_write_samples as usize {
-                       output[ix] = 0.005 * demod_iq.pop_front().unwrap();
+                       output[ix] = 0.005 * demod_iq[ix];
                    })?;
     }
+}
+
+fn plot_spectrum<'a>(signal: &Vec<Complex<f32>>, figure: &'a mut Figure) -> &'a mut Figure {
+    let mut sig = signal.clone();
+    let radix_2: u32 = (sig.len() as f32).log2().ceil() as u32;
+    let new_len = 2u32.pow(radix_2) as usize;
+    println!("signal len: {}, new len: {}", sig.len(), new_len);
+    sig.resize(new_len, Complex::zero());
+    let plan = Plan::new(Operation::Forward, new_len);
+    dft::transform(&mut sig, &plan);
+
+    // Now generate a plot.
+    figure.clear_axes();
+    figure.axes2d()
+        .lines(0..new_len, sig.iter().map(|x| x.norm()), &[]);
+    figure.show();
+    figure
 }
 
 fn init_sdr(sdr_index: i32,
@@ -137,23 +161,12 @@ fn init_sdr(sdr_index: i32,
     Ok(sdr)
 }
 
-fn decimate(signal: &[Complex<f32>], dec_rate: usize) -> Vec<Complex<f32>> {
+fn decimate<T: Copy>(signal: &[T], dec_rate: usize) -> Vec<T> {
     let mut ix = 0;
     let new_size = (signal.len() / dec_rate + 1) as usize;
-    let mut signal_dec = Vec::<Complex<f32>>::with_capacity(new_size);
+    let mut signal_dec = Vec::<T>::with_capacity(new_size);
     while ix < signal.len() {
         signal_dec.push(signal[ix]);
-        ix += dec_rate;
-    }
-    signal_dec
-}
-
-fn decimate_queue(signal: &[f32], dec_rate: usize) -> VecDeque<f32> {
-    let mut ix = 0;
-    let new_size = (signal.len() / dec_rate + 1) as usize;
-    let mut signal_dec = VecDeque::<f32>::with_capacity(new_size);
-    while ix < signal.len() {
-        signal_dec.push_back(signal[ix]);
         ix += dec_rate;
     }
     signal_dec
@@ -182,15 +195,15 @@ fn read_samples(bytes: Vec<u8>) -> Option<Vec<Complex<f32>>> {
 
 fn demod_fm(iq: Vec<Complex<f32>>,
             prev: Complex<f32>)
-            -> (VecDeque<f32>, Complex<f32>) {
+            -> (Vec<f32>, Complex<f32>) {
 
     let mut p = prev.clone();
-    let mut demod_queue: VecDeque<f32> = VecDeque::with_capacity(iq.len());
+    let mut demod_queue: Vec<f32> = Vec::with_capacity(iq.len());
     let gain = SAMPLE_RATE as f32 / (2.0 * PI * 75e3 / 8.0);
 
     for samp in iq.iter() {
         let conj = p.conj() * samp;
-        demod_queue.push_back(conj.arg() * gain);
+        demod_queue.push(conj.arg() * gain);
         p = *samp;
     }
     (demod_queue, p)
@@ -207,15 +220,15 @@ fn filter(samples: Vec<Complex<f32>>, taps: Vec<f32>) -> Vec<Complex<f32>> {
     filt_samps
 }
 
-fn filter_queue(samples: VecDeque<f32>, taps: Vec<f32>) -> VecDeque<f32> {
-    let mut filt_samps: VecDeque<f32> = VecDeque::new();
-    for window in samples.as_slices().0.windows(taps.len()) {
+fn filter_real(samples: Vec<f32>, taps: Vec<f32>) -> Vec<f32> {
+    let mut filt_samps: Vec<f32> = Vec::new();
+    for window in samples.as_slice().windows(taps.len()) {
         let iter = window.iter().zip(taps.iter());
-        let filt_samp = iter.map(|(x, y)| x * y).sum();
-        filt_samps.push_back(filt_samp);
+        let filt_samp = iter.map(|(x, y)| x * y)
+            .fold(0.0, |acc, x| acc + x);
+        filt_samps.push(filt_samp);
     }
     filt_samps
-
 }
 
 fn hamming(ntaps: usize) -> Vec<f32> {
