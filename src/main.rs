@@ -25,7 +25,7 @@ const BUF_SIZE: usize = 262144;
 // Most other sample rates fail, but this one works for my particular device.
 // I will investigate exactly what's happening here and generate a list of
 // possible sample rates (if there are others besides this one).
-const SAMPLE_RATE: u32 = 2400000;
+const SAMPLE_RATE: u32 = 2880000;
 
 // Here is the sample rate of the output waveform we'll try to use.
 const SAMPLE_RATE_AUDIO: f32 = 48000.0;
