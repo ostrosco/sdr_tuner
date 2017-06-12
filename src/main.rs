@@ -2,7 +2,7 @@ extern crate num;
 extern crate portaudio;
 extern crate rtlsdr;
 extern crate dft;
-extern crate gnuplot; 
+extern crate gnuplot;
 
 use portaudio as pa;
 use rtlsdr::{RTLSDRDevice, RTLSDRError};
@@ -28,7 +28,7 @@ const BUF_SIZE: usize = 262144;
 const SAMPLE_RATE: u32 = 2400000;
 
 // Here is the sample rate of the output waveform we'll try to use.
-const SAMPLE_RATE_AUDIO: f32 = 44100.0;
+const SAMPLE_RATE_AUDIO: f32 = 48000.0;
 
 // The number of channels being used for audio.
 const CHANNELS: i32 = 2;
@@ -72,14 +72,14 @@ fn run() -> Result<(), Box<Error>> {
     // We were decimating way too much. We need to decimate in two stages: one
     // to remove nearby stations and another to match the sound card. For
     // wideband signals, 8 and 3 seems to work well and also hits that sweet
-    // spot of no buffer underflows! 
+    // spot of no buffer underflows!
     //
     // TODO: need to still calculate this on the fly. In addition, we need to
     // find apporpriate decimation values for narrowband. I'm still confident
     // that the decimation value depends on the bandwitdh, but I need to
     // figure out that appropriate formula.
     //
-    let dec_rate_filt = 8;
+    let dec_rate_filt = 9;
     let dec_rate_audio = 3;
     let mut sdr =
         RTLSDR { rtlsdr: init_sdr(sdr_index, fm_freq, bandwidth).unwrap() };
@@ -87,21 +87,26 @@ fn run() -> Result<(), Box<Error>> {
     // This holds the previous value for the moving average filter so we can
     // keep track in between iterations of reading from the SDR.
     let mut prev = Complex::new(0.0, 0.0);
-    let taps = low_pass(bandwidth as f32, SAMPLE_RATE as f32, 8);
+
+    // TODO: the number of taps here really affects the speed of the audio. Is
+    // the filter decimating or am I just doing the filter wrong?
+    let taps_filt = low_pass(bandwidth as f32, SAMPLE_RATE as f32, 8);
+    let taps_audio = low_pass(bandwidth as f32 / dec_rate_filt as f32,
+                              SAMPLE_RATE as f32 / dec_rate_filt as f32,
+                              8);
 
     loop {
         // Read the samples and decimate down to match the sample rate of
         // the audio that'll be going out.
         let bytes = sdr.rtlsdr.read_sync(SDR_BUF_SIZE).unwrap();
         let mut iq_vec = read_samples(bytes).unwrap();
-        // plot_spectrum(&iq_vec, &mut figure1);
-        iq_vec = filter(iq_vec, taps.clone());
+        iq_vec = filter(iq_vec, taps_filt.clone());
         iq_vec = decimate(iq_vec.as_slice(), dec_rate_filt);
 
         // After decimation, demodulate the signal and send out of the
         // thread to the receiver.
         let res = demod_fm(iq_vec, prev);
-        let mut demod_iq = filter_real(res.0, taps.clone());
+        let mut demod_iq = filter_real(res.0, taps_audio.clone());
         demod_iq = decimate(demod_iq.as_slice(), dec_rate_audio);
         prev = res.1;
 
@@ -110,7 +115,8 @@ fn run() -> Result<(), Box<Error>> {
             Ok(available) => {
                 match available {
                     pa::StreamAvailable::Frames(frames) => frames as u32,
-                    pa::StreamAvailable::OutputUnderflowed => return Err(Box::new(pa::error::Error::OutputUnderflowed)),
+                    pa::StreamAvailable::OutputUnderflowed =>
+                        return Err(Box::new(pa::error::Error::OutputUnderflowed)),
                     _ => return Err(Box::new(pa::error::Error::NullCallback)),
                 }
             }
@@ -119,9 +125,6 @@ fn run() -> Result<(), Box<Error>> {
 
         let buffer_frames = (demod_iq.len() / CHANNELS as usize) as u32;
         let write_frames = std::cmp::min(buffer_frames, out_frames);
-        if write_frames == 0 {
-            println!("write frames is 0, are we not generating fast enough?");
-        }
         let n_write_samples = write_frames as usize * CHANNELS as usize;
 
         stream.write(write_frames,
@@ -131,7 +134,9 @@ fn run() -> Result<(), Box<Error>> {
     }
 }
 
-fn plot_spectrum<'a>(signal: &Vec<Complex<f32>>, figure: &'a mut Figure) -> &'a mut Figure {
+fn plot_spectrum<'a>(signal: &Vec<Complex<f32>>,
+                     figure: &'a mut Figure)
+                     -> &'a mut Figure {
     let mut sig = signal.clone();
     let radix_2: u32 = (sig.len() as f32).log2().ceil() as u32;
     let new_len = 2u32.pow(radix_2) as usize;
@@ -142,7 +147,8 @@ fn plot_spectrum<'a>(signal: &Vec<Complex<f32>>, figure: &'a mut Figure) -> &'a 
 
     // Now generate a plot.
     figure.clear_axes();
-    figure.axes2d()
+    figure
+        .axes2d()
         .lines(0..new_len, sig.iter().map(|x| x.norm()), &[]);
     figure.show();
     figure
@@ -156,7 +162,7 @@ fn init_sdr(sdr_index: i32,
     try!(sdr.set_center_freq(fm_freq));
     try!(sdr.set_sample_rate(SAMPLE_RATE));
     try!(sdr.set_tuner_bandwidth(bandwidth));
-    try!(sdr.set_agc_mode(false));
+    try!(sdr.set_agc_mode(true));
     try!(sdr.reset_buffer());
     Ok(sdr)
 }
@@ -224,8 +230,7 @@ fn filter_real(samples: Vec<f32>, taps: Vec<f32>) -> Vec<f32> {
     let mut filt_samps: Vec<f32> = Vec::new();
     for window in samples.as_slice().windows(taps.len()) {
         let iter = window.iter().zip(taps.iter());
-        let filt_samp = iter.map(|(x, y)| x * y)
-            .fold(0.0, |acc, x| acc + x);
+        let filt_samp = iter.map(|(x, y)| x * y).fold(0.0, |acc, x| acc + x);
         filt_samps.push(filt_samp);
     }
     filt_samps
