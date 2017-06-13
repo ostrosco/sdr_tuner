@@ -6,11 +6,12 @@ extern crate gnuplot;
 
 use portaudio as pa;
 use rtlsdr::{RTLSDRDevice, RTLSDRError};
-use num::Zero;
+use num::{Num, Zero};
 use num::complex::Complex;
 use std::env;
 use std::f32::consts::PI;
 use std::error::Error;
+use pa::error::Error as PAError;
 
 use gnuplot::*;
 use dft::{Operation, Plan};
@@ -90,23 +91,23 @@ fn run() -> Result<(), Box<Error>> {
 
     // TODO: the number of taps here really affects the speed of the audio. Is
     // the filter decimating or am I just doing the filter wrong?
-    let taps_filt = low_pass(bandwidth as f32, SAMPLE_RATE as f32, 8);
-    let taps_audio = low_pass(bandwidth as f32 / dec_rate_filt as f32,
-                              SAMPLE_RATE as f32 / dec_rate_filt as f32,
-                              8);
+    let taps_filt = windowed_sinc(bandwidth as f32, SAMPLE_RATE as f32, 8);
+    let taps_audio = windowed_sinc(bandwidth as f32 / dec_rate_filt as f32,
+                                   SAMPLE_RATE as f32 / dec_rate_filt as f32,
+                                   8);
 
     loop {
         // Read the samples and decimate down to match the sample rate of
         // the audio that'll be going out.
         let bytes = sdr.rtlsdr.read_sync(SDR_BUF_SIZE).unwrap();
         let mut iq_vec = read_samples(bytes).unwrap();
-        iq_vec = filter(iq_vec, taps_filt.clone());
+        iq_vec = filter(&iq_vec, &taps_filt);
         iq_vec = decimate(iq_vec.as_slice(), dec_rate_filt);
 
         // After decimation, demodulate the signal and send out of the
         // thread to the receiver.
         let res = demod_fm(iq_vec, prev);
-        let mut demod_iq = filter_real(res.0, taps_audio.clone());
+        let mut demod_iq = filter_real(&res.0, &taps_audio);
         demod_iq = decimate(demod_iq.as_slice(), dec_rate_audio);
         prev = res.1;
 
@@ -115,9 +116,10 @@ fn run() -> Result<(), Box<Error>> {
             Ok(available) => {
                 match available {
                     pa::StreamAvailable::Frames(frames) => frames as u32,
-                    pa::StreamAvailable::OutputUnderflowed =>
-                        return Err(Box::new(pa::error::Error::OutputUnderflowed)),
-                    _ => return Err(Box::new(pa::error::Error::NullCallback)),
+                    pa::StreamAvailable::OutputUnderflowed => {
+                        return Err(Box::new(PAError::OutputUnderflowed))
+                    }
+                    _ => return Err(Box::new(PAError::NullCallback)),
                 }
             }
             Err(e) => return Err(Box::new(e)),
@@ -140,7 +142,6 @@ fn plot_spectrum<'a>(signal: &Vec<Complex<f32>>,
     let mut sig = signal.clone();
     let radix_2: u32 = (sig.len() as f32).log2().ceil() as u32;
     let new_len = 2u32.pow(radix_2) as usize;
-    println!("signal len: {}, new len: {}", sig.len(), new_len);
     sig.resize(new_len, Complex::zero());
     let plan = Plan::new(Operation::Forward, new_len);
     dft::transform(&mut sig, &plan);
@@ -190,10 +191,10 @@ fn read_samples(bytes: Vec<u8>) -> Option<Vec<Complex<f32>>> {
     let mut iq_vec: Vec<Complex<f32>> = Vec::with_capacity(bytes_len / 2);
 
     // Write the values to the complex value and normalize from [0, 255] to
-    // [-1, 1]. If we don't normalize, it seems we don't get anything.
+    // [-127, 128].
     for iq in bytes.chunks(2) {
-        let iq_cmplx = Complex::new((iq[0] as f32 - 127.0) / 127.0,
-                                    (iq[1] as f32 - 127.0) / 127.0);
+        let iq_cmplx = Complex::new((iq[0] as f32 - 127.0),
+                                    (iq[1] as f32 - 127.0));
         iq_vec.push(iq_cmplx);
     }
     Some(iq_vec)
@@ -215,27 +216,35 @@ fn demod_fm(iq: Vec<Complex<f32>>,
     (demod_queue, p)
 }
 
-fn filter(samples: Vec<Complex<f32>>, taps: Vec<f32>) -> Vec<Complex<f32>> {
-    let mut filt_samps: Vec<Complex<f32>> = Vec::new();
+fn filter<T: Copy + Num + Zero>(samples: &Vec<Complex<T>>,
+                                taps: &Vec<T>)
+                                -> Vec<Complex<T>> {
+    let mut filt_samps: Vec<Complex<T>> = Vec::new();
     for window in samples.as_slice().windows(taps.len()) {
         let iter = window.iter().zip(taps.iter());
-        let filt_samp = iter.map(|(x, y)| x * y)
-            .fold(Complex::new(0.0, 0.0), |acc, x| acc + x);
+        let filt_samp = iter.map(|(x, y)| *x * *y)
+            .fold(Complex::zero(), |acc, x| acc + x);
         filt_samps.push(filt_samp);
     }
     filt_samps
 }
 
-fn filter_real(samples: Vec<f32>, taps: Vec<f32>) -> Vec<f32> {
-    let mut filt_samps: Vec<f32> = Vec::new();
+fn filter_real<T: Copy + Num + Zero>(samples: &Vec<T>,
+                                     taps: &Vec<T>)
+                                     -> Vec<T> {
+    let mut filt_samps: Vec<T> = Vec::new();
     for window in samples.as_slice().windows(taps.len()) {
         let iter = window.iter().zip(taps.iter());
-        let filt_samp = iter.map(|(x, y)| x * y).fold(0.0, |acc, x| acc + x);
+        let filt_samp = iter.map(|(x, y)| *x * *y)
+            .fold(T::zero(), |acc, x| acc + x);
         filt_samps.push(filt_samp);
     }
     filt_samps
 }
 
+///
+/// Generates taps for a Hamming window.
+///
 fn hamming(ntaps: usize) -> Vec<f32> {
     let m: f32 = ntaps as f32 - 1.0;
     let mut taps: Vec<f32> = Vec::with_capacity(ntaps);
@@ -245,7 +254,10 @@ fn hamming(ntaps: usize) -> Vec<f32> {
     taps
 }
 
-fn low_pass(cutoff_freq: f32, sample_rate: f32, ntaps: usize) -> Vec<f32> {
+///
+/// Generates filter taps for a sinc filter with a Hamming window.
+///
+fn windowed_sinc(cutoff_freq: f32, sample_rate: f32, ntaps: usize) -> Vec<f32> {
     let wc: f32 = 2.0 * PI * cutoff_freq / sample_rate;
     let mut taps: Vec<f32> = Vec::with_capacity(ntaps);
     let win_taps: Vec<f32> = hamming(ntaps);
@@ -264,9 +276,4 @@ fn low_pass(cutoff_freq: f32, sample_rate: f32, ntaps: usize) -> Vec<f32> {
         }
     }
     taps
-}
-
-#[inline]
-fn moving_average(ntaps: usize) -> Vec<f32> {
-    vec![1.0 / ntaps as f32; ntaps]
 }
