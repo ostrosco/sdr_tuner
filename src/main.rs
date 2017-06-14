@@ -206,6 +206,8 @@ fn demod_fm(iq: Vec<Complex<f32>>,
 
     let mut p = prev.clone();
     let mut demod_queue: Vec<f32> = Vec::with_capacity(iq.len());
+
+    // TODO: calculate an appropriate gain here.
     let gain = SAMPLE_RATE as f32 / (2.0 * PI * 75e3 / 8.0);
 
     for samp in iq.iter() {
@@ -216,27 +218,36 @@ fn demod_fm(iq: Vec<Complex<f32>>,
     (demod_queue, p)
 }
 
+///
+/// Filters a Complex vector.
+///
 fn filter<T: Copy + Num + Zero>(samples: &Vec<Complex<T>>,
                                 taps: &Vec<T>)
                                 -> Vec<Complex<T>> {
-    let mut filt_samps: Vec<Complex<T>> = Vec::new();
-    for window in samples.as_slice().windows(taps.len()) {
+    // We'll lose taps.len() - 1 samples from the filtering.
+    let mut filt_samps: Vec<Complex<T>> =
+        Vec::with_capacity(samples.len() - taps.len() + 1);
+
+    for window in samples.windows(taps.len()) {
         let iter = window.iter().zip(taps.iter());
-        let filt_samp = iter.map(|(x, y)| *x * *y)
-            .fold(Complex::zero(), |acc, x| acc + x);
+        let filt_samp = iter.fold(Complex::zero(), |acc, (x, y)| acc + *x * *y);
         filt_samps.push(filt_samp);
     }
     filt_samps
 }
 
+///
+/// Filter a real vector.
+///
 fn filter_real<T: Copy + Num + Zero>(samples: &Vec<T>,
                                      taps: &Vec<T>)
                                      -> Vec<T> {
-    let mut filt_samps: Vec<T> = Vec::new();
-    for window in samples.as_slice().windows(taps.len()) {
+    // We'll lose taps.len() - 1 samples from the filtering.
+    let mut filt_samps: Vec<T> = Vec::with_capacity(samples.len() - taps.len() +
+                                                    1);
+    for window in samples.windows(taps.len()) {
         let iter = window.iter().zip(taps.iter());
-        let filt_samp = iter.map(|(x, y)| *x * *y)
-            .fold(T::zero(), |acc, x| acc + x);
+        let filt_samp = iter.fold(T::zero(), |acc, (x, y)| acc + *x * *y);
         filt_samps.push(filt_samp);
     }
     filt_samps
