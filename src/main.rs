@@ -12,13 +12,15 @@ use std::env;
 use std::f32::consts::PI;
 use std::error::Error;
 use pa::error::Error as PAError;
+use std::thread;
+use std::sync::mpsc::channel;
 
 use gnuplot::*;
 use dft::{Operation, Plan};
 
 // Make sure that the buffer size is radix-2, otherwise the read_sync function
 // will fail with an error code of -8.
-const SDR_BUF_SIZE: usize = 262144;
+const SDR_BUF_SIZE: usize = 524288;
 
 // Separating out the buffer sizes seems to help some.
 const BUF_SIZE: usize = 262144;
@@ -26,7 +28,7 @@ const BUF_SIZE: usize = 262144;
 // Most other sample rates fail, but this one works for my particular device.
 // I will investigate exactly what's happening here and generate a list of
 // possible sample rates (if there are others besides this one).
-const SAMPLE_RATE: u32 = 2880000;
+const SAMPLE_RATE: u32 = 2400000;
 
 // Here is the sample rate of the output waveform we'll try to use.
 const SAMPLE_RATE_AUDIO: f32 = 48000.0;
@@ -84,39 +86,51 @@ fn run() -> Result<(), Box<Error>> {
     // that the decimation value depends on the bandwitdh, but I need to
     // figure out that appropriate formula.
     //
-    let dec_rate_filt = 9;
-    let dec_rate_audio = 3;
+    let dec_rate_filt = 24;
+    let dec_rate_audio = 1;
     let mut sdr =
         RTLSDR { rtlsdr: init_sdr(sdr_index, fm_freq, bandwidth).unwrap() };
 
-    // This holds the previous value for the moving average filter so we can
-    // keep track in between iterations of reading from the SDR.
-    let mut prev = Complex::new(0.0, 0.0);
-
     // TODO: the number of taps here really affects the speed of the audio. Is
     // the filter decimating or am I just doing the filter wrong?
-    let taps_filt = windowed_sinc(bandwidth as f32, SAMPLE_RATE as f32, 32);
+    let taps_filt = windowed_sinc(bandwidth as f32, SAMPLE_RATE as f32, 64);
     let taps_audio = windowed_sinc(
         bandwidth as f32 / dec_rate_filt as f32,
         SAMPLE_RATE as f32 / dec_rate_filt as f32,
-        32,
+        64,
     );
 
+    let (dongle_tx, dongle_rx) = channel();
+    let (demod_tx, demod_rx) = channel();
+
+    thread::spawn(move || {
+        loop {
+            // Read the samples and decimate down to match the sample rate of
+            // the audio that'll be going out.
+            let bytes = sdr.rtlsdr.read_sync(SDR_BUF_SIZE).unwrap();
+            let mut iq_vec = read_samples(bytes).unwrap();
+            iq_vec = filter(&iq_vec, &taps_filt);
+            iq_vec = decimate(iq_vec.as_slice(), dec_rate_filt);
+            dongle_tx.send(iq_vec).unwrap();
+        }
+    });
+
+    thread::spawn(move || {
+        let mut prev = Complex::zero();
+        loop {
+            // After decimation, demodulate the signal and send out of the
+            // thread to the receiver.
+            let iq_vec = dongle_rx.recv().unwrap();
+            let res = demod_fm(iq_vec, prev);
+            let mut demod_iq = filter_real(&res.0, &taps_audio);
+            // demod_iq = decimate(demod_iq.as_slice(), dec_rate_audio);
+            prev = res.1;
+            demod_tx.send(demod_iq).unwrap();
+        }
+    });
+
     loop {
-        // Read the samples and decimate down to match the sample rate of
-        // the audio that'll be going out.
-        let bytes = sdr.rtlsdr.read_sync(SDR_BUF_SIZE).unwrap();
-        let mut iq_vec = read_samples(bytes).unwrap();
-        iq_vec = filter(&iq_vec, &taps_filt);
-        iq_vec = decimate(iq_vec.as_slice(), dec_rate_filt);
-
-        // After decimation, demodulate the signal and send out of the
-        // thread to the receiver.
-        let res = demod_fm(iq_vec, prev);
-        let mut demod_iq = filter_real(&res.0, &taps_audio);
-        demod_iq = decimate(demod_iq.as_slice(), dec_rate_audio);
-        prev = res.1;
-
+        let demod_iq = demod_rx.recv().unwrap();
         // Get the write stream and write our samples to the stream.
         let out_frames = match stream.write_available() {
             Ok(available) => {
@@ -138,7 +152,7 @@ fn run() -> Result<(), Box<Error>> {
         stream.write(
             write_frames,
             |output| for ix in 0..n_write_samples {
-                output[ix] = 0.05 * demod_iq[ix];
+                output[ix] = demod_iq[ix];
             },
         )?;
     }
@@ -206,7 +220,7 @@ fn read_samples(bytes: Vec<u8>) -> Option<Vec<Complex<f32>>> {
     // [-127, 128].
     for iq in bytes.chunks(2) {
         let iq_cmplx =
-            Complex::new((iq[0] as f32 - 127.0), (iq[1] as f32 - 127.0));
+            Complex::new((iq[0] as f32 - 127.0) / 127.0, (iq[1] as f32 - 127.0) / 127.0);
         iq_vec.push(iq_cmplx);
     }
     Some(iq_vec)
@@ -220,8 +234,7 @@ fn demod_fm(
     let mut p = prev.clone();
     let mut demod_queue: Vec<f32> = Vec::with_capacity(iq.len());
 
-    // TODO: calculate an appropriate gain here.
-    let gain = SAMPLE_RATE as f32 / (2.0 * PI * 75e3 / 8.0);
+    let gain = SAMPLE_RATE as f32 / (2.0 * PI * 75e3);
 
     for samp in iq.iter() {
         let conj = p.conj() * samp;
