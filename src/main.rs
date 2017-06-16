@@ -49,22 +49,26 @@ unsafe impl Send for RTLSDR {}
 
 
 fn run() -> Result<(), Box<Error>> {
-    let sdr_index: i32 = env::args().nth(1)
+    let sdr_index: i32 = env::args()
+        .nth(1)
         .expect("Please specify the SDR index")
         .parse::<i32>()?;
-    let fm_freq_mhz: f32 = env::args().nth(2)
+    let fm_freq_mhz: f32 = env::args()
+        .nth(2)
         .expect("Please specify a center frequency (MHz).")
         .parse::<f32>()?;
-    let bandwidth: u32 = env::args().nth(3)
+    let bandwidth: u32 = env::args()
+        .nth(3)
         .expect("Please specify the bandwidth.")
         .parse::<u32>()?;
 
     // Initialize the PortAudio class.
     let audio = try!(pa::PortAudio::new());
-    let settings =
-        try!(audio.default_output_stream_settings(CHANNELS,
-                                                  SAMPLE_RATE_AUDIO as f64,
-                                                  BUF_SIZE as u32));
+    let settings = try!(audio.default_output_stream_settings(
+        CHANNELS,
+        SAMPLE_RATE_AUDIO as f64,
+        BUF_SIZE as u32,
+    ));
     let mut stream = try!(audio.open_blocking_stream(settings));
     try!(stream.start());
 
@@ -91,10 +95,12 @@ fn run() -> Result<(), Box<Error>> {
 
     // TODO: the number of taps here really affects the speed of the audio. Is
     // the filter decimating or am I just doing the filter wrong?
-    let taps_filt = windowed_sinc(bandwidth as f32, SAMPLE_RATE as f32, 8);
-    let taps_audio = windowed_sinc(bandwidth as f32 / dec_rate_filt as f32,
-                                   SAMPLE_RATE as f32 / dec_rate_filt as f32,
-                                   8);
+    let taps_filt = windowed_sinc(bandwidth as f32, SAMPLE_RATE as f32, 32);
+    let taps_audio = windowed_sinc(
+        bandwidth as f32 / dec_rate_filt as f32,
+        SAMPLE_RATE as f32 / dec_rate_filt as f32,
+        32,
+    );
 
     loop {
         // Read the samples and decimate down to match the sample rate of
@@ -129,16 +135,19 @@ fn run() -> Result<(), Box<Error>> {
         let write_frames = std::cmp::min(buffer_frames, out_frames);
         let n_write_samples = write_frames as usize * CHANNELS as usize;
 
-        stream.write(write_frames,
-                   |output| for ix in 0..n_write_samples as usize {
-                       output[ix] = 0.005 * demod_iq[ix];
-                   })?;
+        stream.write(
+            write_frames,
+            |output| for ix in 0..n_write_samples {
+                output[ix] = 0.05 * demod_iq[ix];
+            },
+        )?;
     }
 }
 
-fn plot_spectrum<'a>(signal: &Vec<Complex<f32>>,
-                     figure: &'a mut Figure)
-                     -> &'a mut Figure {
+fn plot_spectrum<'a>(
+    signal: &Vec<Complex<f32>>,
+    figure: &'a mut Figure,
+) -> &'a mut Figure {
     let mut sig = signal.clone();
     let radix_2: u32 = (sig.len() as f32).log2().ceil() as u32;
     let new_len = 2u32.pow(radix_2) as usize;
@@ -148,17 +157,20 @@ fn plot_spectrum<'a>(signal: &Vec<Complex<f32>>,
 
     // Now generate a plot.
     figure.clear_axes();
-    figure
-        .axes2d()
-        .lines(0..new_len, sig.iter().map(|x| x.norm()), &[]);
+    figure.axes2d().lines(
+        0..new_len,
+        sig.iter().map(|x| x.norm()),
+        &[],
+    );
     figure.show();
     figure
 }
 
-fn init_sdr(sdr_index: i32,
-            fm_freq: u32,
-            bandwidth: u32)
-            -> Result<RTLSDRDevice, RTLSDRError> {
+fn init_sdr(
+    sdr_index: i32,
+    fm_freq: u32,
+    bandwidth: u32,
+) -> Result<RTLSDRDevice, RTLSDRError> {
     let mut sdr = try!(rtlsdr::open(sdr_index));
     try!(sdr.set_center_freq(fm_freq));
     try!(sdr.set_sample_rate(SAMPLE_RATE));
@@ -193,16 +205,17 @@ fn read_samples(bytes: Vec<u8>) -> Option<Vec<Complex<f32>>> {
     // Write the values to the complex value and normalize from [0, 255] to
     // [-127, 128].
     for iq in bytes.chunks(2) {
-        let iq_cmplx = Complex::new((iq[0] as f32 - 127.0),
-                                    (iq[1] as f32 - 127.0));
+        let iq_cmplx =
+            Complex::new((iq[0] as f32 - 127.0), (iq[1] as f32 - 127.0));
         iq_vec.push(iq_cmplx);
     }
     Some(iq_vec)
 }
 
-fn demod_fm(iq: Vec<Complex<f32>>,
-            prev: Complex<f32>)
-            -> (Vec<f32>, Complex<f32>) {
+fn demod_fm(
+    iq: Vec<Complex<f32>>,
+    prev: Complex<f32>,
+) -> (Vec<f32>, Complex<f32>) {
 
     let mut p = prev.clone();
     let mut demod_queue: Vec<f32> = Vec::with_capacity(iq.len());
@@ -221,9 +234,10 @@ fn demod_fm(iq: Vec<Complex<f32>>,
 ///
 /// Filters a Complex vector.
 ///
-fn filter<T: Copy + Num + Zero>(samples: &Vec<Complex<T>>,
-                                taps: &Vec<T>)
-                                -> Vec<Complex<T>> {
+fn filter<T: Copy + Num + Zero>(
+    samples: &Vec<Complex<T>>,
+    taps: &Vec<T>,
+) -> Vec<Complex<T>> {
     // We'll lose taps.len() - 1 samples from the filtering.
     let mut filt_samps: Vec<Complex<T>> =
         Vec::with_capacity(samples.len() - taps.len() + 1);
@@ -239,12 +253,13 @@ fn filter<T: Copy + Num + Zero>(samples: &Vec<Complex<T>>,
 ///
 /// Filter a real vector.
 ///
-fn filter_real<T: Copy + Num + Zero>(samples: &Vec<T>,
-                                     taps: &Vec<T>)
-                                     -> Vec<T> {
+fn filter_real<T: Copy + Num + Zero>(
+    samples: &Vec<T>,
+    taps: &Vec<T>,
+) -> Vec<T> {
     // We'll lose taps.len() - 1 samples from the filtering.
-    let mut filt_samps: Vec<T> = Vec::with_capacity(samples.len() - taps.len() +
-                                                    1);
+    let mut filt_samps: Vec<T> =
+        Vec::with_capacity(samples.len() - taps.len() + 1);
     for window in samples.windows(taps.len()) {
         let iter = window.iter().zip(taps.iter());
         let filt_samp = iter.fold(T::zero(), |acc, (x, y)| acc + *x * *y);
@@ -282,7 +297,7 @@ fn windowed_sinc(cutoff_freq: f32, sample_rate: f32, ntaps: usize) -> Vec<f32> {
             taps.push(hi);
         } else {
             let hi = (ix_f * wc).sin() / (ix_f * PI) *
-                     win_taps[(ix + m) as usize];
+                win_taps[(ix + m) as usize];
             taps.push(hi);
         }
     }
