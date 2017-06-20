@@ -19,19 +19,21 @@ use gnuplot::*;
 use dft::{Operation, Plan};
 
 // Make sure that the buffer size is radix-2, otherwise the read_sync function
-// will fail with an error code of -8.
+// will fail with an error code of -8. I want the buffer sizes between the SDR
+// and the audio sizes to match, but since we get two samples per read the
+// buffer size needs to be double.
 const SDR_BUF_SIZE: usize = 524288;
 
-// Separating out the buffer sizes seems to help some.
-const BUF_SIZE: usize = 262144;
+// The buffer size for the audio sink.
+const AUDIO_BUF_SIZE: usize = 262144;
 
 // Most other sample rates fail, but this one works for my particular device.
 // I will investigate exactly what's happening here and generate a list of
 // possible sample rates (if there are others besides this one).
-const SAMPLE_RATE: u32 = 2400000;
+const SDR_SAMPLE_RATE: u32 = 2400000;
 
 // Here is the sample rate of the output waveform we'll try to use.
-const SAMPLE_RATE_AUDIO: f32 = 48000.0;
+const AUDIO_SAMPLE_RATE: f32 = 48000.0;
 
 // The number of channels being used for audio.
 const CHANNELS: i32 = 2;
@@ -94,10 +96,10 @@ fn run() -> Result<(), Box<Error>> {
         // TODO: the number of taps here really affects the speed of the audio.
         // Is the filter decimating or am I just doing the filter wrong?
         let taps_filt =
-            windowed_sinc(bandwidth as f32, SAMPLE_RATE as f32, 128);
+            windowed_sinc(bandwidth as f32, SDR_SAMPLE_RATE as f32, 128);
         let taps_audio = windowed_sinc(
             bandwidth as f32 / dec_rate_filt as f32,
-            SAMPLE_RATE as f32 / dec_rate_filt as f32,
+            SDR_SAMPLE_RATE as f32 / dec_rate_filt as f32,
             128,
         );
 
@@ -124,8 +126,8 @@ fn run() -> Result<(), Box<Error>> {
     let audio = try!(pa::PortAudio::new());
     let settings = try!(audio.default_output_stream_settings(
         CHANNELS,
-        SAMPLE_RATE_AUDIO as f64,
-        BUF_SIZE as u32,
+        AUDIO_SAMPLE_RATE as f64,
+        AUDIO_BUF_SIZE as u32,
     ));
     let mut stream = try!(audio.open_blocking_stream(settings));
     try!(stream.start());
@@ -188,7 +190,7 @@ fn init_sdr(
 ) -> Result<RTLSDRDevice, RTLSDRError> {
     let mut sdr = try!(rtlsdr::open(sdr_index));
     try!(sdr.set_center_freq(fm_freq));
-    try!(sdr.set_sample_rate(SAMPLE_RATE));
+    try!(sdr.set_sample_rate(SDR_SAMPLE_RATE));
     try!(sdr.set_tuner_bandwidth(bandwidth));
     try!(sdr.set_agc_mode(true));
     try!(sdr.reset_buffer());
@@ -218,7 +220,7 @@ fn read_samples(bytes: Vec<u8>) -> Option<Vec<Complex<f32>>> {
     let mut iq_vec: Vec<Complex<f32>> = Vec::with_capacity(bytes_len / 2);
 
     // Write the values to the complex value and normalize from [0, 255] to
-    // [-127, 128].
+    // [-1, 1].
     for iq in bytes.chunks(2) {
         let iq_cmplx = Complex::new(
             (iq[0] as f32 - 127.0) / 127.0,
@@ -237,7 +239,7 @@ fn demod_fm(
     let mut p = prev.clone();
     let mut demod_queue: Vec<f32> = Vec::with_capacity(iq.len());
 
-    let gain = SAMPLE_RATE as f32 / (2.0 * PI * 75e3);
+    let gain = SDR_SAMPLE_RATE as f32 / (2.0 * PI * 75e3);
 
     for samp in iq.iter() {
         let conj = p.conj() * samp;
