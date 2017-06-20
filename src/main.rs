@@ -108,13 +108,13 @@ fn run() -> Result<(), Box<Error>> {
             // First, low_pass and decimate the raw IQ signal.
             let mut iq_vec = dongle_rx.recv().unwrap();
             iq_vec = filter(&iq_vec, &taps_filt);
-            iq_vec = decimate(iq_vec.as_slice(), dec_rate_filt);
+            iq_vec = decimate(iq_vec, dec_rate_filt);
 
             // Next, demodulate the signal and filter the signal again. The
             // second filter seems to help with the noise after demodulation.
             let res = demod_fm(iq_vec, prev);
             let mut demod_iq = filter_real(&res.0, &taps_audio);
-            demod_iq = decimate(demod_iq.as_slice(), dec_rate_audio);
+            demod_iq = decimate(demod_iq, dec_rate_audio);
             prev = res.1;
             demod_tx.send(demod_iq).unwrap();
         }
@@ -199,7 +199,7 @@ fn init_sdr(
     Ok(sdr)
 }
 
-fn decimate<T: Copy>(signal: &[T], dec_rate: usize) -> Vec<T> {
+fn decimate<T: Copy>(signal: Vec<T>, dec_rate: usize) -> Vec<T> {
     let mut ix = 0;
     let new_size = (signal.len() / dec_rate + 1) as usize;
     let mut signal_dec = Vec::<T>::with_capacity(new_size);
