@@ -139,10 +139,12 @@ fn run() -> Result<(), Box<Error>> {
             Ok(available) => {
                 match available {
                     pa::StreamAvailable::Frames(frames) => frames as u32,
+                    pa::StreamAvailable::InputOverflowed => {
+                        return Err(Box::new(PAError::InputOverflowed))
+                    }
                     pa::StreamAvailable::OutputUnderflowed => {
                         return Err(Box::new(PAError::OutputUnderflowed))
                     }
-                    _ => return Err(Box::new(PAError::NullCallback)),
                 }
             }
             Err(e) => return Err(Box::new(e)),
