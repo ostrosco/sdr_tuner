@@ -64,21 +64,23 @@ fn run() -> Result<(), Box<Error>> {
         .expect("Please specify the bandwidth.")
         .parse::<u32>()?;
 
-    // Initialize the SDR based on the user's input parameters.
-    let fm_freq: u32 = (fm_freq_mhz * 1e6) as u32;
-    let mut sdr =
-        RTLSDR { rtlsdr: init_sdr(sdr_index, fm_freq, bandwidth).unwrap() };
-
     // Set up the threading channels for communication between our two threads.
     let (dongle_tx, dongle_rx) = channel();
     let (demod_tx, demod_rx) = channel();
 
     // This thread only collects data off of the SDR as quickly as possible and
     // sends it out.
-    thread::spawn(move || loop {
-        let bytes = sdr.rtlsdr.read_sync(SDR_BUF_SIZE).unwrap();
-        let iq_vec = read_samples(bytes).unwrap();
-        dongle_tx.send(iq_vec).unwrap();
+    thread::spawn(move || {
+        // Initialize the SDR based on the user's input parameters.
+        let fm_freq: u32 = (fm_freq_mhz * 1e6) as u32;
+        let mut sdr =
+            RTLSDR { rtlsdr: init_sdr(sdr_index, fm_freq, bandwidth).unwrap() };
+
+        loop {
+            let bytes = sdr.rtlsdr.read_sync(SDR_BUF_SIZE).unwrap();
+            let iq_vec = read_samples(bytes).unwrap();
+            dongle_tx.send(iq_vec).unwrap();
+        }
     });
 
     // This thread does all of the signal processing required to demodulate
@@ -86,16 +88,17 @@ fn run() -> Result<(), Box<Error>> {
     thread::spawn(move || {
         // Decimating down to 100k samples seems to work the best. I don't
         // really quite get why that is, so I'll need to do more research.
-        let dec_rate_filt = 12;
-        let dec_rate_audio = 2;
+        let dec_rate_filt = 6;
+        let dec_rate_audio = 4;
 
         // TODO: the number of taps here really affects the speed of the audio.
         // Is the filter decimating or am I just doing the filter wrong?
-        let taps_filt = windowed_sinc(bandwidth as f32, SAMPLE_RATE as f32, 64);
+        let taps_filt =
+            windowed_sinc(bandwidth as f32, SAMPLE_RATE as f32, 128);
         let taps_audio = windowed_sinc(
             bandwidth as f32 / dec_rate_filt as f32,
             SAMPLE_RATE as f32 / dec_rate_filt as f32,
-            64,
+            128,
         );
 
         let mut prev = Complex::zero();
