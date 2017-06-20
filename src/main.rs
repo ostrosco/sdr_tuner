@@ -93,8 +93,6 @@ fn run() -> Result<(), Box<Error>> {
         let dec_rate_filt = 6;
         let dec_rate_audio = 4;
 
-        // TODO: the number of taps here really affects the speed of the audio.
-        // Is the filter decimating or am I just doing the filter wrong?
         let taps_filt =
             windowed_sinc(bandwidth as f32, SDR_SAMPLE_RATE as f32, 128);
         let taps_audio = windowed_sinc(
