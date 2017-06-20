@@ -53,18 +53,71 @@ unsafe impl Send for RTLSDR {}
 fn run() -> Result<(), Box<Error>> {
     let sdr_index: i32 = env::args()
         .nth(1)
-        .expect("Please specify the SDR index")
+        .expect("Please specify the SDR index.")
         .parse::<i32>()?;
     let fm_freq_mhz: f32 = env::args()
         .nth(2)
-        .expect("Please specify a center frequency (MHz).")
+        .expect("Please specify a center frequency in MHz.")
         .parse::<f32>()?;
     let bandwidth: u32 = env::args()
         .nth(3)
         .expect("Please specify the bandwidth.")
         .parse::<u32>()?;
 
-    // Initialize the PortAudio class.
+    // Initialize the SDR based on the user's input parameters.
+    let fm_freq: u32 = (fm_freq_mhz * 1e6) as u32;
+    let mut sdr =
+        RTLSDR { rtlsdr: init_sdr(sdr_index, fm_freq, bandwidth).unwrap() };
+
+    // Set up the threading channels for communication between our two threads.
+    let (dongle_tx, dongle_rx) = channel();
+    let (demod_tx, demod_rx) = channel();
+
+    // This thread only collects data off of the SDR as quickly as possible and
+    // sends it out.
+    thread::spawn(move || loop {
+        let bytes = sdr.rtlsdr.read_sync(SDR_BUF_SIZE).unwrap();
+        let iq_vec = read_samples(bytes).unwrap();
+        dongle_tx.send(iq_vec).unwrap();
+    });
+
+    // This thread does all of the signal processing required to demodulate
+    // the signal and get it to a nice audio stream.
+    thread::spawn(move || {
+        // Decimating down to 100k samples seems to work the best. I don't
+        // really quite get why that is, so I'll need to do more research.
+        let dec_rate_filt = 12;
+        let dec_rate_audio = 2;
+
+        // TODO: the number of taps here really affects the speed of the audio.
+        // Is the filter decimating or am I just doing the filter wrong?
+        let taps_filt = windowed_sinc(bandwidth as f32, SAMPLE_RATE as f32, 64);
+        let taps_audio = windowed_sinc(
+            bandwidth as f32 / dec_rate_filt as f32,
+            SAMPLE_RATE as f32 / dec_rate_filt as f32,
+            64,
+        );
+
+        let mut prev = Complex::zero();
+        loop {
+            // First, low_pass and decimate the raw IQ signal.
+            let mut iq_vec = dongle_rx.recv().unwrap();
+            iq_vec = filter(&iq_vec, &taps_filt);
+            iq_vec = decimate(iq_vec.as_slice(), dec_rate_filt);
+
+            // Next, demodulate the signal and filter the signal again. The
+            // second filter seems to help with the noise after demodulation.
+            let res = demod_fm(iq_vec, prev);
+            let mut demod_iq = filter_real(&res.0, &taps_audio);
+            demod_iq = decimate(demod_iq.as_slice(), dec_rate_audio);
+            prev = res.1;
+            demod_tx.send(demod_iq).unwrap();
+        }
+    });
+
+    // Initialize the PortAudio class. We use a blocking stream since we're
+    // doing processing on the signal and can't keep up with non-blocking
+    // timing requirements.
     let audio = try!(pa::PortAudio::new());
     let settings = try!(audio.default_output_stream_settings(
         CHANNELS,
@@ -74,64 +127,9 @@ fn run() -> Result<(), Box<Error>> {
     let mut stream = try!(audio.open_blocking_stream(settings));
     try!(stream.start());
 
-    let fm_freq: u32 = (fm_freq_mhz * 1e6) as u32;
-
-    // We were decimating way too much. We need to decimate in two stages: one
-    // to remove nearby stations and another to match the sound card. For
-    // wideband signals, 8 and 3 seems to work well and also hits that sweet
-    // spot of no buffer underflows!
-    //
-    // TODO: need to still calculate this on the fly. In addition, we need to
-    // find apporpriate decimation values for narrowband. I'm still confident
-    // that the decimation value depends on the bandwitdh, but I need to
-    // figure out that appropriate formula.
-    //
-    let dec_rate_filt = 24;
-    let dec_rate_audio = 1;
-    let mut sdr =
-        RTLSDR { rtlsdr: init_sdr(sdr_index, fm_freq, bandwidth).unwrap() };
-
-    // TODO: the number of taps here really affects the speed of the audio. Is
-    // the filter decimating or am I just doing the filter wrong?
-    let taps_filt = windowed_sinc(bandwidth as f32, SAMPLE_RATE as f32, 64);
-    let taps_audio = windowed_sinc(
-        bandwidth as f32 / dec_rate_filt as f32,
-        SAMPLE_RATE as f32 / dec_rate_filt as f32,
-        64,
-    );
-
-    let (dongle_tx, dongle_rx) = channel();
-    let (demod_tx, demod_rx) = channel();
-
-    thread::spawn(move || {
-        loop {
-            // Read the samples and decimate down to match the sample rate of
-            // the audio that'll be going out.
-            let bytes = sdr.rtlsdr.read_sync(SDR_BUF_SIZE).unwrap();
-            let mut iq_vec = read_samples(bytes).unwrap();
-            iq_vec = filter(&iq_vec, &taps_filt);
-            iq_vec = decimate(iq_vec.as_slice(), dec_rate_filt);
-            dongle_tx.send(iq_vec).unwrap();
-        }
-    });
-
-    thread::spawn(move || {
-        let mut prev = Complex::zero();
-        loop {
-            // After decimation, demodulate the signal and send out of the
-            // thread to the receiver.
-            let iq_vec = dongle_rx.recv().unwrap();
-            let res = demod_fm(iq_vec, prev);
-            let mut demod_iq = filter_real(&res.0, &taps_audio);
-            // demod_iq = decimate(demod_iq.as_slice(), dec_rate_audio);
-            prev = res.1;
-            demod_tx.send(demod_iq).unwrap();
-        }
-    });
-
     loop {
         let demod_iq = demod_rx.recv().unwrap();
-        // Get the write stream and write our samples to the stream.
+
         let out_frames = match stream.write_available() {
             Ok(available) => {
                 match available {
@@ -219,8 +217,10 @@ fn read_samples(bytes: Vec<u8>) -> Option<Vec<Complex<f32>>> {
     // Write the values to the complex value and normalize from [0, 255] to
     // [-127, 128].
     for iq in bytes.chunks(2) {
-        let iq_cmplx =
-            Complex::new((iq[0] as f32 - 127.0) / 127.0, (iq[1] as f32 - 127.0) / 127.0);
+        let iq_cmplx = Complex::new(
+            (iq[0] as f32 - 127.0) / 127.0,
+            (iq[1] as f32 - 127.0) / 127.0,
+        );
         iq_vec.push(iq_cmplx);
     }
     Some(iq_vec)
