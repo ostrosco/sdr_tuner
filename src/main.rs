@@ -136,31 +136,30 @@ fn run() -> Result<(), Box<Error>> {
 
     loop {
         let demod_iq = demod_rx.recv().unwrap();
+        let buffer_frames = (demod_iq.len() / CHANNELS as usize) as u32;
+        let mut out_frames = 0;
 
-        let out_frames = match stream.write_available() {
-            Ok(available) => {
-                match available {
-                    pa::StreamAvailable::Frames(frames) => frames as u32,
-                    pa::StreamAvailable::InputOverflowed => {
-                        return Err(Box::new(PAError::InputOverflowed))
-                    }
-                    pa::StreamAvailable::OutputUnderflowed => {
-                        return Err(Box::new(PAError::OutputUnderflowed))
+        while out_frames < buffer_frames {
+            out_frames = match stream.write_available() {
+                Ok(available) => {
+                    match available {
+                        pa::StreamAvailable::Frames(frames) => frames as u32,
+                        pa::StreamAvailable::InputOverflowed => {
+                            return Err(Box::new(PAError::InputOverflowed))
+                        }
+                        pa::StreamAvailable::OutputUnderflowed => {
+                            return Err(Box::new(PAError::OutputUnderflowed))
+                        }
                     }
                 }
-            }
-            Err(e) => return Err(Box::new(e)),
-        };
-
-        let buffer_frames = (demod_iq.len() / CHANNELS as usize) as u32;
-        let write_frames = std::cmp::min(buffer_frames, out_frames);
-        let n_write_samples = write_frames as usize * CHANNELS as usize;
-        if write_frames == 0 {
-            println!("We can't write any more frames!");
+                Err(e) => return Err(Box::new(e)),
+            };
         }
 
+        let n_write_samples = buffer_frames as usize * CHANNELS as usize;
+
         stream.write(
-            write_frames,
+            buffer_frames,
             |output| for ix in 0..n_write_samples {
                 output[ix] = demod_iq[ix];
             },
