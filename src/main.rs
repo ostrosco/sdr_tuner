@@ -17,10 +17,10 @@ use std::sync::mpsc::channel;
 // will fail with an error code of -8. I want the buffer sizes between the SDR
 // and the audio sizes to match, but since we get two samples per read the
 // buffer size needs to be double.
-const SDR_BUF_SIZE: usize = 524288;
+const SDR_BUF_SIZE: usize = 262144;
 
 // The buffer size for the audio sink.
-const AUDIO_BUF_SIZE: usize = 262144;
+const AUDIO_BUF_SIZE: usize = 524288;
 
 // Most other sample rates fail, but this one works for my particular device.
 // I will investigate exactly what's happening here and generate a list of
@@ -32,6 +32,10 @@ const AUDIO_SAMPLE_RATE: f32 = 48000.0;
 
 // The number of channels being used for audio.
 const CHANNELS: i32 = 2;
+
+// We set the gain manually right now since it seems to be a better option
+// than using the AGC (the SDR gets blazing hot with the AGC on).
+const SDR_GAIN: i32 = 496;
 
 fn main() {
     match run() {
@@ -75,7 +79,7 @@ fn run() -> Result<(), Box<Error>> {
 
         loop {
             let bytes = sdr.rtlsdr.read_sync(SDR_BUF_SIZE).unwrap();
-            let iq_vec = read_samples(bytes).unwrap();
+            let iq_vec = samps_to_cmplx(bytes).unwrap();
             dongle_tx.send(iq_vec).unwrap();
         }
     });
@@ -151,6 +155,9 @@ fn run() -> Result<(), Box<Error>> {
         let buffer_frames = (demod_iq.len() / CHANNELS as usize) as u32;
         let write_frames = std::cmp::min(buffer_frames, out_frames);
         let n_write_samples = write_frames as usize * CHANNELS as usize;
+        if write_frames == 0 {
+            println!("We can't write any more frames!");
+        }
 
         stream.write(
             write_frames,
@@ -170,7 +177,8 @@ fn init_sdr(
     try!(sdr.set_center_freq(fm_freq));
     try!(sdr.set_sample_rate(SDR_SAMPLE_RATE));
     try!(sdr.set_tuner_bandwidth(bandwidth));
-    try!(sdr.set_agc_mode(true));
+    try!(sdr.set_tuner_gain(SDR_GAIN));
+    try!(sdr.set_agc_mode(false));
     try!(sdr.reset_buffer());
     Ok(sdr)
 }
@@ -186,7 +194,7 @@ fn decimate<T: Copy>(signal: Vec<T>, dec_rate: usize) -> Vec<T> {
     signal_dec
 }
 
-fn read_samples(bytes: Vec<u8>) -> Option<Vec<Complex<f32>>> {
+fn samps_to_cmplx(bytes: Vec<u8>) -> Option<Vec<Complex<f32>>> {
     // First, check that we've been given an even number of bytes. Not sure
     // what to do if we don't get I and Q.
     let bytes_len = bytes.len();
@@ -195,10 +203,10 @@ fn read_samples(bytes: Vec<u8>) -> Option<Vec<Complex<f32>>> {
         return None;
 
     }
-    let mut iq_vec: Vec<Complex<f32>> = Vec::with_capacity(bytes_len / 2);
 
     // Write the values to the complex value and normalize from [0, 255] to
     // [-1, 1].
+    let mut iq_vec: Vec<Complex<f32>> = Vec::with_capacity(bytes_len / 2);
     for iq in bytes.chunks(2) {
         let iq_cmplx = Complex::new(
             (iq[0] as f32 - 127.0) / 127.0,
@@ -285,14 +293,20 @@ fn windowed_sinc(
     ntaps: usize,
     window: &Fn(usize) -> Vec<f32>,
 ) -> Vec<f32> {
+    // Convert the frequency to radians and make it a ratio of the sample rate.
     let wc: f32 = 2.0 * PI * cutoff_freq / sample_rate;
-    let mut taps: Vec<f32> = Vec::with_capacity(ntaps);
+
     let win_taps: Vec<f32> = window(ntaps);
+    let mut taps: Vec<f32> = Vec::with_capacity(ntaps);
+
     let ntaps_i: i32 = ntaps as i32;
     let m: i32 = (ntaps_i - 1) / 2;
 
     for ix in -m..m + 1 {
         let ix_f: f32 = ix as f32;
+
+        // The windowed sinc function is undefined at zero, so set it to
+        // something sensible here.
         if ix == 0 {
             let hi = wc / PI * win_taps[(ix + m) as usize];
             taps.push(hi);
