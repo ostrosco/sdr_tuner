@@ -15,9 +15,6 @@ use pa::error::Error as PAError;
 use std::thread;
 use std::sync::mpsc::channel;
 
-use gnuplot::*;
-use dft::{Operation, Plan};
-
 // Make sure that the buffer size is radix-2, otherwise the read_sync function
 // will fail with an error code of -8. I want the buffer sizes between the SDR
 // and the audio sizes to match, but since we get two samples per read the
@@ -159,28 +156,6 @@ fn run() -> Result<(), Box<Error>> {
             },
         )?;
     }
-}
-
-fn plot_spectrum<'a>(
-    signal: &Vec<Complex<f32>>,
-    figure: &'a mut Figure,
-) -> &'a mut Figure {
-    let mut sig = signal.clone();
-    let radix_2: u32 = (sig.len() as f32).log2().ceil() as u32;
-    let new_len = 2u32.pow(radix_2) as usize;
-    sig.resize(new_len, Complex::zero());
-    let plan = Plan::new(Operation::Forward, new_len);
-    dft::transform(&mut sig, &plan);
-
-    // Now generate a plot.
-    figure.clear_axes();
-    figure.axes2d().lines(
-        0..new_len,
-        sig.iter().map(|x| x.norm()),
-        &[],
-    );
-    figure.show();
-    figure
 }
 
 fn init_sdr(
