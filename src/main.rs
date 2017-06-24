@@ -88,12 +88,17 @@ fn run() -> Result<(), Box<Error>> {
         let dec_rate_filt = 6;
         let dec_rate_audio = 4;
 
-        let taps_filt =
-            windowed_sinc(bandwidth as f32, SDR_SAMPLE_RATE as f32, 128);
+        let taps_filt = windowed_sinc(
+            bandwidth as f32,
+            SDR_SAMPLE_RATE as f32,
+            128,
+            &hamming,
+        );
         let taps_audio = windowed_sinc(
             bandwidth as f32 / dec_rate_filt as f32,
             SDR_SAMPLE_RATE as f32 / dec_rate_filt as f32,
             128,
+            &hamming,
         );
 
         let mut prev = Complex::zero();
@@ -274,10 +279,15 @@ fn hamming(ntaps: usize) -> Vec<f32> {
 ///
 /// Generates filter taps for a sinc filter with a Hamming window.
 ///
-fn windowed_sinc(cutoff_freq: f32, sample_rate: f32, ntaps: usize) -> Vec<f32> {
+fn windowed_sinc(
+    cutoff_freq: f32,
+    sample_rate: f32,
+    ntaps: usize,
+    window: &Fn(usize) -> Vec<f32>,
+) -> Vec<f32> {
     let wc: f32 = 2.0 * PI * cutoff_freq / sample_rate;
     let mut taps: Vec<f32> = Vec::with_capacity(ntaps);
-    let win_taps: Vec<f32> = hamming(ntaps);
+    let win_taps: Vec<f32> = window(ntaps);
     let ntaps_i: i32 = ntaps as i32;
     let m: i32 = (ntaps_i - 1) / 2;
 
