@@ -1,8 +1,6 @@
 extern crate num;
 extern crate portaudio;
 extern crate rtlsdr;
-extern crate dft;
-extern crate gnuplot;
 
 use portaudio as pa;
 use rtlsdr::{RTLSDRDevice, RTLSDRError};
