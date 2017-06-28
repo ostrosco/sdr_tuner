@@ -182,6 +182,13 @@ fn init_sdr(
     Ok(sdr)
 }
 
+/// Decimates a signal by an integer factor.
+///
+/// # Arguments
+///
+/// * `signal` - The signal to decimate
+/// * `dec_rate` - The decimation factor
+///
 fn decimate<T: Copy>(signal: Vec<T>, dec_rate: usize) -> Vec<T> {
     let mut ix = 0;
     let new_size = (signal.len() / dec_rate + 1) as usize;
@@ -193,6 +200,12 @@ fn decimate<T: Copy>(signal: Vec<T>, dec_rate: usize) -> Vec<T> {
     signal_dec
 }
 
+/// Converts samples from the SDR into complex IQ pairs.
+///
+/// # Arguments
+///
+/// * `bytes` - The unsigned bytes from the SDR.
+///
 fn samps_to_cmplx(bytes: Vec<u8>) -> Option<Vec<Complex<f32>>> {
     // First, check that we've been given an even number of bytes. Not sure
     // what to do if we don't get I and Q.
@@ -216,6 +229,13 @@ fn samps_to_cmplx(bytes: Vec<u8>) -> Option<Vec<Complex<f32>>> {
     Some(iq_vec)
 }
 
+/// Performs FM demodulation on a complex signal.
+///
+/// # Arguments
+///
+/// * `iq` - The IQ samples to demodulate
+/// * `prev` - The previous sample from the previous demodulation.
+///
 fn demod_fm(
     iq: Vec<Complex<f32>>,
     prev: Complex<f32>,
@@ -234,8 +254,12 @@ fn demod_fm(
     (demod_queue, p)
 }
 
+/// Filters a Complex vector and returns a new vector.
 ///
-/// Filters a Complex vector.
+/// # Arguments
+///
+/// * `samples` - The complex samples to filter
+/// * `taps` - The taps of the filter
 ///
 fn filter<T: Copy + Num + Zero>(
     samples: &Vec<Complex<T>>,
@@ -253,8 +277,12 @@ fn filter<T: Copy + Num + Zero>(
     filt_samps
 }
 
+/// Filters a real vector and returns a new vector.
 ///
-/// Filter a real vector.
+/// # Arguments
+///
+/// * `samples` - The real samples to filter
+/// * `taps` - The taps of the filter
 ///
 fn filter_real<T: Copy + Num + Zero>(
     samples: &Vec<T>,
@@ -271,8 +299,11 @@ fn filter_real<T: Copy + Num + Zero>(
     filt_samps
 }
 
+/// Generates a vector containing the taps for a Hamming window.
 ///
-/// Generates taps for a Hamming window.
+/// # Arguments
+///
+/// * `ntaps` - The number of taps to generate for the filter
 ///
 fn hamming(ntaps: usize) -> Vec<f32> {
     let m: f32 = ntaps as f32 - 1.0;
@@ -283,8 +314,14 @@ fn hamming(ntaps: usize) -> Vec<f32> {
     taps
 }
 
+/// Generates filter taps for a sinc filter with a windowing function.
 ///
-/// Generates filter taps for a sinc filter with a Hamming window.
+/// # Arguments
+///
+/// * `cutoff_freq` - The cutoff frequency in Hertz
+/// * `sample_rate` - The sample frequency in Hertz
+/// * `ntaps` - The number of taps to generate for the window
+/// * `window` - THe windowing function used to generate the taps for the window
 ///
 fn windowed_sinc(
     cutoff_freq: f32,
