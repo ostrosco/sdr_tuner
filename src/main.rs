@@ -17,15 +17,15 @@ use std::sync::mpsc::channel;
 // will fail with an error code of -8. I want the buffer sizes between the SDR
 // and the audio sizes to match, but since we get two samples per read the
 // buffer size needs to be double.
-const SDR_BUF_SIZE: usize = 262144;
+const SDR_BUF_SIZE: usize = 262_144;
 
 // The buffer size for the audio sink.
-const AUDIO_BUF_SIZE: usize = 524288;
+const AUDIO_BUF_SIZE: usize = 524_288;
 
 // Most other sample rates fail, but this one works for my particular device.
 // I will investigate exactly what's happening here and generate a list of
 // possible sample rates (if there are others besides this one).
-const SDR_SAMPLE_RATE: u32 = 2400000;
+const SDR_SAMPLE_RATE: u32 = 2_400_000;
 
 // Here is the sample rate of the output waveform we'll try to use.
 const AUDIO_SAMPLE_RATE: f32 = 48000.0;
@@ -79,7 +79,7 @@ fn run() -> Result<(), Box<Error>> {
 
         loop {
             let bytes = sdr.rtlsdr.read_sync(SDR_BUF_SIZE).unwrap();
-            let iq_vec = samps_to_cmplx(bytes).unwrap();
+            let iq_vec = samps_to_cmplx(bytes.as_slice()).unwrap();
             dongle_tx.send(iq_vec).unwrap();
         }
     });
@@ -110,13 +110,13 @@ fn run() -> Result<(), Box<Error>> {
             // First, low_pass and decimate the raw IQ signal.
             let mut iq_vec = dongle_rx.recv().unwrap();
             iq_vec = filter(&iq_vec, &taps_filt);
-            iq_vec = decimate(iq_vec, dec_rate_filt);
+            iq_vec = decimate(&iq_vec, dec_rate_filt);
 
             // Next, demodulate the signal and filter the signal again. The
             // second filter seems to help with the noise after demodulation.
-            let res = demod_fm(iq_vec, prev);
+            let res = demod_fm(&iq_vec, prev);
             let mut demod_iq = filter_real(&res.0, &taps_audio);
-            demod_iq = decimate(demod_iq, dec_rate_audio);
+            demod_iq = decimate(&demod_iq, dec_rate_audio);
             prev = res.1;
             demod_tx.send(demod_iq).unwrap();
         }
@@ -189,7 +189,7 @@ fn init_sdr(
 /// * `signal` - The signal to decimate
 /// * `dec_rate` - The decimation factor
 ///
-fn decimate<T: Copy>(signal: Vec<T>, dec_rate: usize) -> Vec<T> {
+fn decimate<T: Copy>(signal: &[T], dec_rate: usize) -> Vec<T> {
     let mut ix = 0;
     let new_size = (signal.len() / dec_rate + 1) as usize;
     let mut signal_dec = Vec::<T>::with_capacity(new_size);
@@ -206,7 +206,7 @@ fn decimate<T: Copy>(signal: Vec<T>, dec_rate: usize) -> Vec<T> {
 ///
 /// * `bytes` - The unsigned bytes from the SDR.
 ///
-fn samps_to_cmplx(bytes: Vec<u8>) -> Option<Vec<Complex<f32>>> {
+fn samps_to_cmplx(bytes: &[u8]) -> Option<Vec<Complex<f32>>> {
     // First, check that we've been given an even number of bytes. Not sure
     // what to do if we don't get I and Q.
     let bytes_len = bytes.len();
@@ -237,11 +237,11 @@ fn samps_to_cmplx(bytes: Vec<u8>) -> Option<Vec<Complex<f32>>> {
 /// * `prev` - The previous sample from the previous demodulation.
 ///
 fn demod_fm(
-    iq: Vec<Complex<f32>>,
+    iq: &[Complex<f32>],
     prev: Complex<f32>,
 ) -> (Vec<f32>, Complex<f32>) {
 
-    let mut p = prev.clone();
+    let mut p = prev;
     let mut demod_queue: Vec<f32> = Vec::with_capacity(iq.len());
 
     let gain = SDR_SAMPLE_RATE as f32 / (2.0 * PI * 75e3);
@@ -262,8 +262,8 @@ fn demod_fm(
 /// * `taps` - The taps of the filter
 ///
 fn filter<T: Copy + Num + Zero>(
-    samples: &Vec<Complex<T>>,
-    taps: &Vec<T>,
+    samples: &[Complex<T>],
+    taps: &[T],
 ) -> Vec<Complex<T>> {
     // We'll lose taps.len() - 1 samples from the filtering.
     let mut filt_samps: Vec<Complex<T>> =
@@ -285,8 +285,8 @@ fn filter<T: Copy + Num + Zero>(
 /// * `taps` - The taps of the filter
 ///
 fn filter_real<T: Copy + Num + Zero>(
-    samples: &Vec<T>,
-    taps: &Vec<T>,
+    samples: &[T],
+    taps: &[T],
 ) -> Vec<T> {
     // We'll lose taps.len() - 1 samples from the filtering.
     let mut filt_samps: Vec<T> =
@@ -321,7 +321,7 @@ fn hamming(ntaps: usize) -> Vec<f32> {
 /// * `cutoff_freq` - The cutoff frequency in Hertz
 /// * `sample_rate` - The sample frequency in Hertz
 /// * `ntaps` - The number of taps to generate for the window
-/// * `window` - THe windowing function used to generate the taps for the window
+/// * `window` - The windowing function used to generate the taps for the window
 ///
 fn windowed_sinc(
     cutoff_freq: f32,
