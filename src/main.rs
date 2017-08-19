@@ -12,6 +12,7 @@ use std::error::Error;
 use pa::error::Error as PAError;
 use std::thread;
 use std::sync::mpsc::channel;
+use std::cmp::min;
 
 // Make sure that the buffer size is radix-2, otherwise the read_sync function
 // will fail with an error code of -8. I want the buffer sizes between the SDR
@@ -261,15 +262,16 @@ fn filter<T: Copy + Num + Zero>(samples: &[Complex<T>],
                                 taps: &[T])
                                 -> Vec<Complex<T>> {
 
-    // We'll lose taps.len() - 1 samples from the filtering.
-    let mut filt_samps: Vec<Complex<T>> =
-        Vec::with_capacity(samples.len() - taps.len() + 1);
+    let mut filt_samps: Vec<Complex<T>> = Vec::with_capacity(samples.len());
 
-    for window in samples.windows(taps.len()) {
-        let iter = window.iter().zip(taps.iter());
-        let filt_samp = iter.fold(Complex::zero(), |acc, (x, y)| acc + *x * *y);
-        filt_samps.push(filt_samp);
+    for samp in 0 .. samples.len() {
+        let mut filt_val = Complex::zero();
+        for filt in 0 .. min(samp, taps.len()) {
+            filt_val = filt_val +  samples[samp - filt] * taps[filt];
+        }
+        filt_samps.push(filt_val);
     }
+
     filt_samps
 }
 
@@ -281,14 +283,16 @@ fn filter<T: Copy + Num + Zero>(samples: &[Complex<T>],
 /// * `taps` - The taps of the filter
 ///
 fn filter_real<T: Copy + Num + Zero>(samples: &[T], taps: &[T]) -> Vec<T> {
-    // We'll lose taps.len() - 1 samples from the filtering.
-    let mut filt_samps: Vec<T> = Vec::with_capacity(samples.len() - taps.len() +
-                                                    1);
-    for window in samples.windows(taps.len()) {
-        let iter = window.iter().zip(taps.iter());
-        let filt_samp = iter.fold(T::zero(), |acc, (x, y)| acc + *x * *y);
-        filt_samps.push(filt_samp);
+    let mut filt_samps: Vec<T> = Vec::with_capacity(samples.len());
+
+    for samp in 0 .. samples.len() {
+        let mut filt_val = T::zero();
+        for filt in 0 .. min(samp, taps.len()) {
+            filt_val = filt_val + samples[samp - filt] * taps[filt];
+        }
+        filt_samps.push(filt_val);
     }
+
     filt_samps
 }
 
