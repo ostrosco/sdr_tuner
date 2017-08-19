@@ -96,18 +96,15 @@ fn run() -> Result<(), Box<Error>> {
         let dec_rate_filt = 6;
         let dec_rate_audio = 4;
 
-        let taps_filt = windowed_sinc(
-            bandwidth as f32,
-            SDR_SAMPLE_RATE as f32,
-            16,
-            &hamming,
-        );
-        let taps_audio = windowed_sinc(
-            bandwidth as f32 / dec_rate_filt as f32,
-            SDR_SAMPLE_RATE as f32 / dec_rate_filt as f32,
-            16,
-            &hamming,
-        );
+        let taps_filt = windowed_sinc(bandwidth as f32,
+                                      SDR_SAMPLE_RATE as f32,
+                                      16,
+                                      &hamming);
+        let taps_audio = windowed_sinc(bandwidth as f32 / dec_rate_filt as f32,
+                                       SDR_SAMPLE_RATE as f32 /
+                                       dec_rate_filt as f32,
+                                       16,
+                                       &hamming);
 
         let mut prev = Complex::zero();
         loop {
@@ -130,11 +127,10 @@ fn run() -> Result<(), Box<Error>> {
     // doing processing on the signal and can't keep up with non-blocking
     // timing requirements.
     let audio = try!(pa::PortAudio::new());
-    let settings = try!(audio.default_output_stream_settings(
-        CHANNELS,
-        AUDIO_SAMPLE_RATE as f64,
-        AUDIO_BUF_SIZE as u32,
-    ));
+    let settings =
+        try!(audio.default_output_stream_settings(CHANNELS,
+                                                  AUDIO_SAMPLE_RATE as f64,
+                                                  AUDIO_BUF_SIZE as u32));
     let mut stream = try!(audio.open_blocking_stream(settings));
     try!(stream.start());
 
@@ -162,20 +158,17 @@ fn run() -> Result<(), Box<Error>> {
 
         let n_write_samples = buffer_frames as usize * CHANNELS as usize;
 
-        stream.write(
-            buffer_frames,
-            |output| for ix in 0..n_write_samples {
+        stream
+            .write(buffer_frames, |output| for ix in 0..n_write_samples {
                 output[ix] = demod_iq[ix];
-            },
-        )?;
+            })?;
     }
 }
 
-fn init_sdr(
-    sdr_index: i32,
-    fm_freq: u32,
-    bandwidth: u32,
-) -> Result<RTLSDRDevice, RTLSDRError> {
+fn init_sdr(sdr_index: i32,
+            fm_freq: u32,
+            bandwidth: u32)
+            -> Result<RTLSDRDevice, RTLSDRError> {
     let mut sdr = try!(rtlsdr::open(sdr_index));
     try!(sdr.set_center_freq(fm_freq));
     try!(sdr.set_sample_rate(SDR_SAMPLE_RATE));
@@ -224,10 +217,8 @@ fn samps_to_cmplx(bytes: &[u8]) -> Option<Vec<Complex<f32>>> {
     // [-1, 1].
     let mut iq_vec: Vec<Complex<f32>> = Vec::with_capacity(bytes_len / 2);
     for iq in bytes.chunks(2) {
-        let iq_cmplx = Complex::new(
-            (iq[0] as f32 - 127.0) / 127.0,
-            (iq[1] as f32 - 127.0) / 127.0,
-        );
+        let iq_cmplx = Complex::new((iq[0] as f32 - 127.0) / 127.0,
+                                    (iq[1] as f32 - 127.0) / 127.0);
         iq_vec.push(iq_cmplx);
     }
     Some(iq_vec)
@@ -241,11 +232,10 @@ fn samps_to_cmplx(bytes: &[u8]) -> Option<Vec<Complex<f32>>> {
 /// * `prev` - The previous sample from the previous demodulation.
 /// * `deviation` - The maximum frequency deviation in Hz.
 ///
-fn demod_fm(
-    iq: &[Complex<f32>],
-    prev: Complex<f32>,
-    deviation: f32,
-) -> (Vec<f32>, Complex<f32>) {
+fn demod_fm(iq: &[Complex<f32>],
+            prev: Complex<f32>,
+            deviation: f32)
+            -> (Vec<f32>, Complex<f32>) {
 
     let mut p = prev;
     let mut demod_queue: Vec<f32> = Vec::with_capacity(iq.len());
@@ -267,10 +257,9 @@ fn demod_fm(
 /// * `samples` - The complex samples to filter
 /// * `taps` - The taps of the filter
 ///
-fn filter<T: Copy + Num + Zero>(
-    samples: &[Complex<T>],
-    taps: &[T],
-) -> Vec<Complex<T>> {
+fn filter<T: Copy + Num + Zero>(samples: &[Complex<T>],
+                                taps: &[T])
+                                -> Vec<Complex<T>> {
 
     // We'll lose taps.len() - 1 samples from the filtering.
     let mut filt_samps: Vec<Complex<T>> =
@@ -291,13 +280,10 @@ fn filter<T: Copy + Num + Zero>(
 /// * `samples` - The real samples to filter
 /// * `taps` - The taps of the filter
 ///
-fn filter_real<T: Copy + Num + Zero>(
-    samples: &[T],
-    taps: &[T],
-) -> Vec<T> {
+fn filter_real<T: Copy + Num + Zero>(samples: &[T], taps: &[T]) -> Vec<T> {
     // We'll lose taps.len() - 1 samples from the filtering.
-    let mut filt_samps: Vec<T> =
-        Vec::with_capacity(samples.len() - taps.len() + 1);
+    let mut filt_samps: Vec<T> = Vec::with_capacity(samples.len() - taps.len() +
+                                                    1);
     for window in samples.windows(taps.len()) {
         let iter = window.iter().zip(taps.iter());
         let filt_samp = iter.fold(T::zero(), |acc, (x, y)| acc + *x * *y);
@@ -330,12 +316,11 @@ fn hamming(ntaps: usize) -> Vec<f32> {
 /// * `ntaps` - The number of taps to generate for the window
 /// * `window` - The windowing function used to generate the taps for the window
 ///
-fn windowed_sinc(
-    cutoff_freq: f32,
-    sample_rate: f32,
-    ntaps: usize,
-    window: &Fn(usize) -> Vec<f32>,
-) -> Vec<f32> {
+fn windowed_sinc(cutoff_freq: f32,
+                 sample_rate: f32,
+                 ntaps: usize,
+                 window: &Fn(usize) -> Vec<f32>)
+                 -> Vec<f32> {
     // Convert the frequency to radians and make it a ratio of the sample rate.
     let wc: f32 = 2.0 * PI * cutoff_freq / sample_rate;
 
@@ -355,7 +340,7 @@ fn windowed_sinc(
             taps.push(hi);
         } else {
             let hi = (ix_f * wc).sin() / (ix_f * PI) *
-                win_taps[(ix + m) as usize];
+                     win_taps[(ix + m) as usize];
             taps.push(hi);
         }
     }
