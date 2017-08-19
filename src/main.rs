@@ -246,7 +246,7 @@ fn demod_fm(
 
     let gain = SDR_SAMPLE_RATE as f32 / (2.0 * PI * 75e3);
 
-    for samp in iq.iter() {
+    for samp in iq {
         let conj = p.conj() * samp;
         demod_queue.push(conj.arg() * gain);
         p = *samp;
