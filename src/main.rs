@@ -64,6 +64,10 @@ fn run() -> Result<(), Box<Error>> {
         .nth(3)
         .expect("Please specify the bandwidth.")
         .parse::<u32>()?;
+    let deviation: f32 = env::args()
+        .nth(4)
+        .expect("Please specify the deviation.")
+        .parse::<f32>()?;
 
     // Set up the threading channels for communication between our two threads.
     let (dongle_tx, dongle_rx) = channel();
@@ -95,13 +99,13 @@ fn run() -> Result<(), Box<Error>> {
         let taps_filt = windowed_sinc(
             bandwidth as f32,
             SDR_SAMPLE_RATE as f32,
-            128,
+            16,
             &hamming,
         );
         let taps_audio = windowed_sinc(
             bandwidth as f32 / dec_rate_filt as f32,
             SDR_SAMPLE_RATE as f32 / dec_rate_filt as f32,
-            128,
+            16,
             &hamming,
         );
 
@@ -114,7 +118,7 @@ fn run() -> Result<(), Box<Error>> {
 
             // Next, demodulate the signal and filter the signal again. The
             // second filter seems to help with the noise after demodulation.
-            let res = demod_fm(&iq_vec, prev);
+            let res = demod_fm(&iq_vec, prev, deviation);
             let mut demod_iq = filter_real(&res.0, &taps_audio);
             demod_iq = decimate(&demod_iq, dec_rate_audio);
             prev = res.1;
@@ -233,18 +237,20 @@ fn samps_to_cmplx(bytes: &[u8]) -> Option<Vec<Complex<f32>>> {
 ///
 /// # Arguments
 ///
-/// * `iq` - The IQ samples to demodulate
+/// * `iq` - The IQ samples to demodulate.
 /// * `prev` - The previous sample from the previous demodulation.
+/// * `deviation` - The maximum frequency deviation in Hz.
 ///
 fn demod_fm(
     iq: &[Complex<f32>],
     prev: Complex<f32>,
+    deviation: f32,
 ) -> (Vec<f32>, Complex<f32>) {
 
     let mut p = prev;
     let mut demod_queue: Vec<f32> = Vec::with_capacity(iq.len());
 
-    let gain = SDR_SAMPLE_RATE as f32 / (2.0 * PI * 75e3);
+    let gain = SDR_SAMPLE_RATE as f32 / (2.0 * PI * deviation);
 
     for samp in iq {
         let conj = p.conj() * samp;
@@ -265,6 +271,7 @@ fn filter<T: Copy + Num + Zero>(
     samples: &[Complex<T>],
     taps: &[T],
 ) -> Vec<Complex<T>> {
+
     // We'll lose taps.len() - 1 samples from the filtering.
     let mut filt_samps: Vec<Complex<T>> =
         Vec::with_capacity(samples.len() - taps.len() + 1);
