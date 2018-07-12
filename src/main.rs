@@ -2,17 +2,17 @@ extern crate num;
 extern crate portaudio;
 extern crate rtlsdr;
 
+use num::complex::Complex;
+use num::{Num, Zero};
+use pa::error::Error as PAError;
 use portaudio as pa;
 use rtlsdr::{RTLSDRDevice, RTLSDRError};
-use num::{Num, Zero};
-use num::complex::Complex;
-use std::env;
-use std::f32::consts::PI;
-use std::error::Error;
-use pa::error::Error as PAError;
-use std::thread;
-use std::sync::mpsc::channel;
 use std::cmp::min;
+use std::env;
+use std::error::Error;
+use std::f32::consts::PI;
+use std::sync::mpsc::channel;
+use std::thread;
 
 // Make sure that the buffer size is radix-2, otherwise the read_sync function
 // will fail with an error code of -8. I want the buffer sizes between the SDR
@@ -51,7 +51,6 @@ struct RTLSDR {
 
 unsafe impl Send for RTLSDR {}
 
-
 fn run() -> Result<(), Box<Error>> {
     let sdr_index: i32 = env::args()
         .nth(1)
@@ -60,14 +59,6 @@ fn run() -> Result<(), Box<Error>> {
     let fm_freq_mhz: f32 = env::args()
         .nth(2)
         .expect("Please specify a center frequency in MHz.")
-        .parse::<f32>()?;
-    let bandwidth: u32 = env::args()
-        .nth(3)
-        .expect("Please specify the bandwidth.")
-        .parse::<u32>()?;
-    let deviation: f32 = env::args()
-        .nth(4)
-        .expect("Please specify the deviation.")
         .parse::<f32>()?;
 
     // Set up the threading channels for communication between our two threads.
@@ -79,8 +70,9 @@ fn run() -> Result<(), Box<Error>> {
     thread::spawn(move || {
         // Initialize the SDR based on the user's input parameters.
         let fm_freq: u32 = (fm_freq_mhz * 1e6) as u32;
-        let mut sdr =
-            RTLSDR { rtlsdr: init_sdr(sdr_index, fm_freq, bandwidth).unwrap() };
+        let mut sdr = RTLSDR {
+            rtlsdr: init_sdr(sdr_index, fm_freq).unwrap(),
+        };
 
         loop {
             let bytes = sdr.rtlsdr.read_sync(SDR_BUF_SIZE).unwrap();
@@ -97,15 +89,13 @@ fn run() -> Result<(), Box<Error>> {
         let dec_rate_filt = 6;
         let dec_rate_audio = 4;
 
-        let taps_filt = windowed_sinc(bandwidth as f32,
-                                      SDR_SAMPLE_RATE as f32,
-                                      16,
-                                      &hamming);
-        let taps_audio = windowed_sinc(bandwidth as f32 / dec_rate_filt as f32,
-                                       SDR_SAMPLE_RATE as f32 /
-                                       dec_rate_filt as f32,
-                                       16,
-                                       &hamming);
+        let taps_filt =
+            windowed_sinc(SDR_SAMPLE_RATE as f32, 16, &hamming);
+        let taps_audio = windowed_sinc(
+            SDR_SAMPLE_RATE as f32 / dec_rate_filt as f32,
+            16,
+            &hamming,
+        );
 
         let mut prev = Complex::zero();
         loop {
@@ -116,7 +106,7 @@ fn run() -> Result<(), Box<Error>> {
 
             // Next, demodulate the signal and filter the signal again. The
             // second filter seems to help with the noise after demodulation.
-            let res = demod_fm(&iq_vec, prev, deviation);
+            let res = demod_fm(&iq_vec, prev);
             let mut demod_iq = filter_real(&res.0, &taps_audio);
             demod_iq = decimate(&demod_iq, dec_rate_audio);
             prev = res.1;
@@ -128,10 +118,11 @@ fn run() -> Result<(), Box<Error>> {
     // doing processing on the signal and can't keep up with non-blocking
     // timing requirements.
     let audio = try!(pa::PortAudio::new());
-    let settings =
-        try!(audio.default_output_stream_settings(CHANNELS,
-                                                  AUDIO_SAMPLE_RATE as f64,
-                                                  AUDIO_BUF_SIZE as u32));
+    let settings = try!(audio.default_output_stream_settings(
+        CHANNELS,
+        AUDIO_SAMPLE_RATE as f64,
+        AUDIO_BUF_SIZE as u32
+    ));
     let mut stream = try!(audio.open_blocking_stream(settings));
     try!(stream.start());
 
@@ -142,38 +133,33 @@ fn run() -> Result<(), Box<Error>> {
 
         while out_frames < buffer_frames {
             out_frames = match stream.write_available() {
-                Ok(available) => {
-                    match available {
-                        pa::StreamAvailable::Frames(frames) => frames as u32,
-                        pa::StreamAvailable::InputOverflowed => {
-                            return Err(Box::new(PAError::InputOverflowed))
-                        }
-                        pa::StreamAvailable::OutputUnderflowed => {
-                            return Err(Box::new(PAError::OutputUnderflowed))
-                        }
+                Ok(available) => match available {
+                    pa::StreamAvailable::Frames(frames) => frames as u32,
+                    pa::StreamAvailable::InputOverflowed => {
+                        return Err(Box::new(PAError::InputOverflowed))
                     }
-                }
+                    pa::StreamAvailable::OutputUnderflowed => {
+                        return Err(Box::new(PAError::OutputUnderflowed))
+                    }
+                },
                 Err(e) => return Err(Box::new(e)),
             };
         }
 
         let n_write_samples = buffer_frames as usize * CHANNELS as usize;
 
-        stream
-            .write(buffer_frames, |output| for ix in 0..n_write_samples {
+        stream.write(buffer_frames, |output| {
+            for ix in 0..n_write_samples {
                 output[ix] = demod_iq[ix];
-            })?;
+            }
+        })?;
     }
 }
 
-fn init_sdr(sdr_index: i32,
-            fm_freq: u32,
-            bandwidth: u32)
-            -> Result<RTLSDRDevice, RTLSDRError> {
+fn init_sdr(sdr_index: i32, fm_freq: u32) -> Result<RTLSDRDevice, RTLSDRError> {
     let mut sdr = try!(rtlsdr::open(sdr_index));
     try!(sdr.set_center_freq(fm_freq));
     try!(sdr.set_sample_rate(SDR_SAMPLE_RATE));
-    try!(sdr.set_tuner_bandwidth(bandwidth));
     try!(sdr.set_tuner_gain(SDR_GAIN));
     try!(sdr.set_agc_mode(false));
     try!(sdr.reset_buffer());
@@ -211,15 +197,16 @@ fn samps_to_cmplx(bytes: &[u8]) -> Option<Vec<Complex<f32>>> {
     if bytes_len % 2 != 0 {
         println!("Received an odd number of samples.");
         return None;
-
     }
 
     // Write the values to the complex value and normalize from [0, 255] to
     // [-1, 1].
     let mut iq_vec: Vec<Complex<f32>> = Vec::with_capacity(bytes_len / 2);
     for iq in bytes.chunks(2) {
-        let iq_cmplx = Complex::new((iq[0] as f32 - 127.0) / 127.0,
-                                    (iq[1] as f32 - 127.0) / 127.0);
+        let iq_cmplx = Complex::new(
+            (iq[0] as f32 - 127.0) / 127.0,
+            (iq[1] as f32 - 127.0) / 127.0,
+        );
         iq_vec.push(iq_cmplx);
     }
     Some(iq_vec)
@@ -233,15 +220,15 @@ fn samps_to_cmplx(bytes: &[u8]) -> Option<Vec<Complex<f32>>> {
 /// * `prev` - The previous sample from the previous demodulation.
 /// * `deviation` - The maximum frequency deviation in Hz.
 ///
-fn demod_fm(iq: &[Complex<f32>],
-            prev: Complex<f32>,
-            deviation: f32)
-            -> (Vec<f32>, Complex<f32>) {
-
+fn demod_fm(
+    iq: &[Complex<f32>],
+    prev: Complex<f32>,
+) -> (Vec<f32>, Complex<f32>) {
     let mut p = prev;
     let mut demod_queue: Vec<f32> = Vec::with_capacity(iq.len());
 
-    let gain = SDR_SAMPLE_RATE as f32 / (2.0 * PI * deviation);
+    // Magic gain number. Would be nice to get something better.
+    let gain = SDR_SAMPLE_RATE as f32 / (2.0 * PI * 75.0);
 
     for samp in iq {
         let conj = p.conj() * samp;
@@ -258,16 +245,16 @@ fn demod_fm(iq: &[Complex<f32>],
 /// * `samples` - The complex samples to filter
 /// * `taps` - The taps of the filter
 ///
-fn filter<T: Copy + Num + Zero>(samples: &[Complex<T>],
-                                taps: &[T])
-                                -> Vec<Complex<T>> {
-
+fn filter<T: Copy + Num + Zero>(
+    samples: &[Complex<T>],
+    taps: &[T],
+) -> Vec<Complex<T>> {
     let mut filt_samps: Vec<Complex<T>> = Vec::with_capacity(samples.len());
 
-    for samp in 0 .. samples.len() {
+    for samp in 0..samples.len() {
         let mut filt_val = Complex::zero();
-        for filt in 0 .. min(samp, taps.len()) {
-            filt_val = filt_val +  samples[samp - filt] * taps[filt];
+        for filt in 0..min(samp, taps.len()) {
+            filt_val = filt_val + samples[samp - filt] * taps[filt];
         }
         filt_samps.push(filt_val);
     }
@@ -285,9 +272,9 @@ fn filter<T: Copy + Num + Zero>(samples: &[Complex<T>],
 fn filter_real<T: Copy + Num + Zero>(samples: &[T], taps: &[T]) -> Vec<T> {
     let mut filt_samps: Vec<T> = Vec::with_capacity(samples.len());
 
-    for samp in 0 .. samples.len() {
+    for samp in 0..samples.len() {
         let mut filt_val = T::zero();
-        for filt in 0 .. min(samp, taps.len()) {
+        for filt in 0..min(samp, taps.len()) {
             filt_val = filt_val + samples[samp - filt] * taps[filt];
         }
         filt_samps.push(filt_val);
@@ -315,18 +302,16 @@ fn hamming(ntaps: usize) -> Vec<f32> {
 ///
 /// # Arguments
 ///
-/// * `cutoff_freq` - The cutoff frequency in Hertz
 /// * `sample_rate` - The sample frequency in Hertz
 /// * `ntaps` - The number of taps to generate for the window
 /// * `window` - The windowing function used to generate the taps for the window
 ///
-fn windowed_sinc(cutoff_freq: f32,
-                 sample_rate: f32,
-                 ntaps: usize,
-                 window: &Fn(usize) -> Vec<f32>)
-                 -> Vec<f32> {
-    // Convert the frequency to radians and make it a ratio of the sample rate.
-    let wc: f32 = 2.0 * PI * cutoff_freq / sample_rate;
+fn windowed_sinc(
+    sample_rate: f32,
+    ntaps: usize,
+    window: &Fn(usize) -> Vec<f32>,
+) -> Vec<f32> {
+    let wc: f32 = 2.0 * PI / sample_rate;
 
     let win_taps: Vec<f32> = window(ntaps);
     let mut taps: Vec<f32> = Vec::with_capacity(ntaps);
@@ -335,18 +320,17 @@ fn windowed_sinc(cutoff_freq: f32,
     let m: i32 = (ntaps_i - 1) / 2;
 
     for ix in -m..m + 1 {
-        let ix_f: f32 = ix as f32;
+        let ix_f = ix as f32;
 
         // The windowed sinc function is undefined at zero, so set it to
         // something sensible here.
-        if ix == 0 {
-            let hi = wc / PI * win_taps[(ix + m) as usize];
-            taps.push(hi);
+        let mut hi = if ix == 0 {
+            wc
         } else {
-            let hi = (ix_f * wc).sin() / (ix_f * PI) *
-                     win_taps[(ix + m) as usize];
-            taps.push(hi);
-        }
+            (ix_f * wc).sin() / (ix_f)
+        };
+        hi *= win_taps[(ix + m) as usize];
+        taps.push(hi);
     }
     taps
 }
