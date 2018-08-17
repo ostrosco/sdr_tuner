@@ -84,8 +84,9 @@ fn run() -> Result<(), Box<Error>> {
     // This thread does all of the signal processing required to demodulate
     // the signal and get it to a nice audio stream.
     thread::spawn(move || {
-        // Decimating down to 100k samples seems to work the best. I don't
-        // really quite get why that is, so I'll need to do more research.
+        // We decimate down to 100k samples. This is close to the optimal value
+        // of 96k samples, but provides just enough buffer to avoid overruns and
+        // improves the audio quality substantially.
         let dec_rate_filt = 6;
         let dec_rate_audio = 4;
 
