@@ -90,8 +90,7 @@ fn run() -> Result<(), Box<Error>> {
         let dec_rate_filt = 6;
         let dec_rate_audio = 4;
 
-        let taps_filt =
-            windowed_sinc(SDR_SAMPLE_RATE as f32, 16, &hamming);
+        let taps_filt = windowed_sinc(SDR_SAMPLE_RATE as f32, 16, &hamming);
         let taps_audio = windowed_sinc(
             SDR_SAMPLE_RATE as f32 / dec_rate_filt as f32,
             16,
@@ -121,7 +120,7 @@ fn run() -> Result<(), Box<Error>> {
     let audio = try!(pa::PortAudio::new());
     let settings = try!(audio.default_output_stream_settings(
         CHANNELS,
-        AUDIO_SAMPLE_RATE as f64,
+        f64::from(AUDIO_SAMPLE_RATE),
         AUDIO_BUF_SIZE as u32
     ));
     let mut stream = try!(audio.open_blocking_stream(settings));
@@ -150,9 +149,8 @@ fn run() -> Result<(), Box<Error>> {
         let n_write_samples = buffer_frames as usize * CHANNELS as usize;
 
         stream.write(buffer_frames, |output| {
-            for ix in 0..n_write_samples {
-                output[ix] = demod_iq[ix];
-            }
+            output[..n_write_samples]
+                .clone_from_slice(&demod_iq[..n_write_samples]);
         })?;
     }
 }
@@ -205,8 +203,8 @@ fn samps_to_cmplx(bytes: &[u8]) -> Option<Vec<Complex<f32>>> {
     let mut iq_vec: Vec<Complex<f32>> = Vec::with_capacity(bytes_len / 2);
     for iq in bytes.chunks(2) {
         let iq_cmplx = Complex::new(
-            (iq[0] as f32 - 127.0) / 127.0,
-            (iq[1] as f32 - 127.0) / 127.0,
+            (f32::from(iq[0]) - 127.0) / 127.0,
+            (f32::from(iq[1]) - 127.0) / 127.0,
         );
         iq_vec.push(iq_cmplx);
     }
